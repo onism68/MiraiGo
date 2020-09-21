@@ -75,6 +75,7 @@ type QQClient struct {
 	requestPacketRequestId int32
 	groupSeq               int32
 	friendSeq              int32
+	heartbeatEnabled       bool
 	groupDataTransSeq      int32
 	highwayApplyUpSeq      int32
 	eventHandlers          *eventHandlers
@@ -141,6 +142,7 @@ func NewClientMd5(uin int64, passwordMd5 [16]byte) *QQClient {
 			"MultiMsg.ApplyDown":                           decodeMultiApplyDownResponse,    // 长消息/合并转发请求下载包
 			"OidbSvc.0x6d6_2":                              decodeOIDB6d6Response,           // 群文件操作包
 			"OidbSvc.0x88d_0":                              decodeGroupInfoResponse,         // 获取群资料包
+			"OidbSvc.0xe07_0":                              decodeImageOcrResponse,          // 图片OCR请求包
 			"SummaryCard.ReqSummaryCard":                   decodeSummaryCardResponse,       // 获取用户卡片资料包
 			"PttCenterSvr.ShortVideoDownReq":               decodePttShortVideoDownResponse, // 短视频下载请求包
 			"LightAppSvc.mini_app_info.GetAppInfoById":     decodeAppInfoResponse,           // 获取小程序资料包
@@ -196,7 +198,9 @@ func (c *QQClient) Login() (*LoginResponse, error) {
 	if l.Success {
 		c.lastLostMsg = ""
 		c.registerClient()
-		c.startHeartbeat()
+		if !c.heartbeatEnabled {
+			c.startHeartbeat()
+		}
 	}
 	return &l, nil
 }
@@ -267,7 +271,9 @@ func (c *QQClient) SubmitCaptcha(result string, sign []byte) (*LoginResponse, er
 	l := rsp.(LoginResponse)
 	if l.Success {
 		c.registerClient()
-		c.startHeartbeat()
+		if !c.heartbeatEnabled {
+			c.startHeartbeat()
+		}
 	}
 	return &l, nil
 }
@@ -594,7 +600,7 @@ func (c *QQClient) UploadGroupImage(groupCode int64, img []byte) (*message.Group
 	}
 	return nil, errors.New("upload failed")
 ok:
-	return message.NewGroupImage(binary.CalculateImageResourceId(h[:]), h[:], rsp.FileId), nil
+	return message.NewGroupImage(binary.CalculateImageResourceId(h[:]), h[:], rsp.FileId, int32(len(img)), rsp.Width, rsp.Height), nil
 }
 
 func (c *QQClient) UploadPrivateImage(target int64, img []byte) (*message.FriendImageElement, error) {
@@ -617,6 +623,24 @@ func (c *QQClient) uploadPrivateImage(target int64, img []byte, count int) (*mes
 		return c.uploadPrivateImage(target, img, count)
 	}
 	return e, nil
+}
+
+func (c *QQClient) ImageOcr(img interface{}) (*OcrResponse, error) {
+	switch e := img.(type) {
+	case *message.GroupImageElement:
+		rsp, err := c.sendAndWait(c.buildImageOcrRequestPacket(e.Url, strings.ToUpper(hex.EncodeToString(e.Md5)), e.Size, e.Width, e.Height))
+		if err != nil {
+			return nil, err
+		}
+		return rsp.(*OcrResponse), nil
+	case *message.ImageElement:
+		rsp, err := c.sendAndWait(c.buildImageOcrRequestPacket(e.Url, strings.ToUpper(hex.EncodeToString(e.Md5)), e.Size, e.Width, e.Height))
+		if err != nil {
+			return nil, err
+		}
+		return rsp.(*OcrResponse), nil
+	}
+	return nil, errors.New("image error")
 }
 
 func (c *QQClient) UploadGroupPtt(groupCode int64, voice []byte) (*message.GroupVoiceElement, error) {
@@ -665,7 +689,7 @@ func (c *QQClient) QueryGroupImage(groupCode int64, hash []byte, size int32) (*m
 		return nil, errors.New(rsp.Message)
 	}
 	if rsp.IsExists {
-		return message.NewGroupImage(binary.CalculateImageResourceId(hash), hash, rsp.FileId), nil
+		return message.NewGroupImage(binary.CalculateImageResourceId(hash), hash, rsp.FileId, size, rsp.Width, rsp.Height), nil
 	}
 	return nil, errors.New("image not exists")
 }
@@ -913,6 +937,7 @@ func (c *QQClient) connect() error {
 		if err = c.connect(); err != nil {
 			return err
 		}
+		return nil
 	}
 	c.retryTimes = 0
 	c.ConnectTime = time.Now()
@@ -988,7 +1013,7 @@ func (c *QQClient) sendAndWait(seq uint16, pkt []byte) (interface{}, error) {
 				continue
 			}
 			c.handlers.Delete(seq)
-			c.Error("packet timed out, seq: %v", seq)
+			//c.Error("packet timed out, seq: %v", seq)
 			//println("Packet Timed out")
 			return nil, errors.New("timeout")
 		}
@@ -1069,6 +1094,7 @@ func (c *QQClient) netLoop() {
 }
 
 func (c *QQClient) startHeartbeat() {
+	c.heartbeatEnabled = true
 	time.AfterFunc(30*time.Second, c.doHeartbeat)
 }
 
@@ -1080,4 +1106,5 @@ func (c *QQClient) doHeartbeat() {
 		_, _ = c.sendAndWait(seq, packet)
 		time.AfterFunc(30*time.Second, c.doHeartbeat)
 	}
+	c.heartbeatEnabled = false
 }
