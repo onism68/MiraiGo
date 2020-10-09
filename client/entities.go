@@ -3,6 +3,7 @@ package client
 import (
 	"errors"
 	"github.com/Mrs4s/MiraiGo/binary/jce"
+	"github.com/Mrs4s/MiraiGo/message"
 	"strings"
 	"sync"
 )
@@ -29,6 +30,9 @@ type (
 
 		// Unsafe device
 		VerifyUrl string
+
+		// SMS needed
+		SMSPhone string
 
 		// other error
 		ErrorMessage string
@@ -70,13 +74,14 @@ type (
 		MaxMemberCount uint16
 		Members        []*GroupMemberInfo
 
-		client  *QQClient
-		memLock sync.Mutex
+		client *QQClient
+		lock   sync.RWMutex
 	}
 
 	GroupMemberInfo struct {
 		Group                  *GroupInfo
 		Uin                    int64
+		Gender                 byte
 		Nickname               string
 		CardName               string
 		Level                  uint16
@@ -116,6 +121,12 @@ type (
 	MemberJoinGroupEvent struct {
 		Group  *GroupInfo
 		Member *GroupMemberInfo
+	}
+
+	MemberCardUpdatedEvent struct {
+		Group   *GroupInfo
+		OldCard string
+		Member  *GroupMemberInfo
 	}
 
 	IGroupNotifyEvent interface {
@@ -235,22 +246,27 @@ type (
 	groupMessageReceiptEvent struct {
 		Rand int32
 		Seq  int32
+		Msg  *message.GroupMessage
 	}
 )
 
 const (
-	NeedCaptcha       LoginError = 1
-	OtherLoginError   LoginError = 3
-	UnsafeDeviceError LoginError = 4
-	UnknownLoginError LoginError = -1
+	NeedCaptcha            LoginError = 1
+	OtherLoginError        LoginError = 3
+	UnsafeDeviceError      LoginError = 4
+	SMSNeededError         LoginError = 5
+	TooManySMSRequestError LoginError = 6
+	SMSOrVerifyNeededError LoginError = 7
+	SliderNeededError      LoginError = 8
+	UnknownLoginError      LoginError = -1
 
 	Owner MemberPermission = iota
 	Administrator
 	Member
 
-	AndroidPhone ClientProtocol = 537062845
-	AndroidPad   ClientProtocol = 537062409
-	AndroidWatch ClientProtocol = 537061176
+	AndroidPhone ClientProtocol = 1
+	AndroidPad   ClientProtocol = 2
+	AndroidWatch ClientProtocol = 3
 )
 
 func (g *GroupInfo) UpdateName(newName string) {
@@ -283,6 +299,42 @@ func (g *GroupInfo) Quit() {
 	if g.SelfPermission() != Owner {
 		g.client.quitGroup(g.Code)
 	}
+}
+
+func (g *GroupInfo) SelfPermission() MemberPermission {
+	return g.FindMember(g.client.Uin).Permission
+}
+
+func (g *GroupInfo) AdministratorOrOwner() bool {
+	return g.SelfPermission() == Administrator || g.SelfPermission() == Owner
+}
+
+func (g *GroupInfo) FindMember(uin int64) *GroupMemberInfo {
+	r := g.Read(func(info *GroupInfo) interface{} {
+		for _, m := range info.Members {
+			f := m
+			if f.Uin == uin {
+				return f
+			}
+		}
+		return nil
+	})
+	if r == nil {
+		return nil
+	}
+	return r.(*GroupMemberInfo)
+}
+
+func (g *GroupInfo) Update(f func(*GroupInfo)) {
+	g.lock.Lock()
+	defer g.lock.Unlock()
+	f(g)
+}
+
+func (g *GroupInfo) Read(f func(*GroupInfo) interface{}) interface{} {
+	g.lock.RLock()
+	defer g.lock.RUnlock()
+	return f(g)
 }
 
 func (m *GroupMemberInfo) DisplayName() string {

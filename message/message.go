@@ -58,6 +58,15 @@ type (
 		Message    []IMessageElement
 	}
 
+	RichMessage struct {
+		Title      string
+		Summary    string
+		Brief      string
+		Url        string
+		PictureUrl string
+		MusicUrl   string
+	}
+
 	Sender struct {
 		Uin      int64
 		Nickname string
@@ -70,6 +79,8 @@ type (
 	}
 
 	ElementType int
+
+	GroupGift int
 )
 
 const (
@@ -85,6 +96,16 @@ const (
 	Video
 	LightApp
 	RedBag
+
+	SweetWink      GroupGift = 285
+	HappyCola      GroupGift = 289
+	LuckyBracelet  GroupGift = 290
+	Cappuccino     GroupGift = 299
+	CatWatch       GroupGift = 302
+	FleeceGloves   GroupGift = 307
+	RainbowCandy   GroupGift = 308
+	Stronger       GroupGift = 313
+	LoveMicrophone GroupGift = 367
 )
 
 func (s *Sender) IsAnonymous() bool {
