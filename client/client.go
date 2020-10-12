@@ -409,10 +409,6 @@ func (c *QQClient) SendGroupMessage(groupCode int64, m *message.SendingMessage, 
 				Message:    m.Elements,
 			},
 		}})
-		if ret != nil && ret.Id == -1 {
-			c.Error("long message send error. trying fragmented sending...")
-			return c.SendGroupMessage(groupCode, m, true)
-		}
 		return ret
 	}
 	return c.sendGroupMessage(groupCode, false, m)
@@ -1076,6 +1072,7 @@ func (c *QQClient) sendAndWait(seq uint16, pkt []byte) (interface{}, error) {
 func (c *QQClient) netLoop() {
 	reader := binary.NewNetworkReader(c.Conn)
 	retry := 0
+	errCount := 0
 	for c.Online {
 		l, err := reader.ReadInt32()
 		if err == io.EOF || err == io.ErrClosedPipe {
@@ -1098,7 +1095,11 @@ func (c *QQClient) netLoop() {
 		data, err := reader.ReadBytes(int(l) - 4)
 		pkt, err := packets.ParseIncomingPacket(data, c.sigInfo.d2Key)
 		if err != nil {
-			c.Error("parse incoming packer error: %v", err)
+			c.Error("parse incoming packet error: %v", err)
+			errCount++
+			if errCount > 5 {
+				c.Online = false
+			}
 			//log.Println("parse incoming packet error: " + err.Error())
 			continue
 		}
@@ -1110,6 +1111,7 @@ func (c *QQClient) netLoop() {
 				continue
 			}
 		}
+		errCount = 0
 		retry = 0
 		c.Debug("rev pkt: %v seq: %v", pkt.CommandName, pkt.SequenceId)
 		go func() {
