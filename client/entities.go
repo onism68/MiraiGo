@@ -11,6 +11,7 @@ import (
 var (
 	ErrAlreadyOnline  = errors.New("already online")
 	ErrMemberNotFound = errors.New("member not found")
+	ErrNotExists      = errors.New("not exists")
 )
 
 type (
@@ -43,7 +44,6 @@ type (
 		Nickname string
 		Remark   string
 		FaceId   int16
-
 		//msgSeqList *utils.Cache
 	}
 
@@ -129,7 +129,7 @@ type (
 		Member  *GroupMemberInfo
 	}
 
-	IGroupNotifyEvent interface {
+	INotifyEvent interface {
 		From() int64
 		Content() string
 	}
@@ -202,18 +202,16 @@ type (
 	}
 
 	imageUploadResponse struct {
-		ResultCode int32
-		Message    string
-
-		IsExists bool
-		FileId   int64
-		Width    int32
-		Height   int32
-
-		ResourceId string
 		UploadKey  []byte
 		UploadIp   []int32
 		UploadPort []int32
+		ResourceId string
+		Message    string
+		FileId     int64
+		Width      int32
+		Height     int32
+		ResultCode int32
+		IsExists   bool
 	}
 
 	pttUploadResponse struct {
@@ -251,8 +249,9 @@ const (
 	Member
 
 	AndroidPhone ClientProtocol = 1
-	AndroidPad   ClientProtocol = 2
+	IPad         ClientProtocol = 2
 	AndroidWatch ClientProtocol = 3
+	MacOS        ClientProtocol = 4
 )
 
 func (g *GroupInfo) UpdateName(newName string) {
@@ -354,9 +353,9 @@ func (m *GroupMemberInfo) EditSpecialTitle(title string) {
 	}
 }
 
-func (m *GroupMemberInfo) Kick(msg string) {
+func (m *GroupMemberInfo) Kick(msg string, block bool) {
 	if m.Uin != m.Group.client.Uin && m.Manageable() {
-		m.Group.client.kickGroupMember(m.Group.Code, m.Uin, msg)
+		m.Group.client.kickGroupMember(m.Group.Code, m.Uin, msg, block)
 	}
 }
 

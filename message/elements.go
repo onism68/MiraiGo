@@ -2,10 +2,11 @@ package message
 
 import (
 	"fmt"
-	"github.com/Mrs4s/MiraiGo/binary"
-	"github.com/Mrs4s/MiraiGo/client/pb/msg"
 	"strconv"
 	"strings"
+
+	"github.com/Mrs4s/MiraiGo/binary"
+	"github.com/Mrs4s/MiraiGo/client/pb/msg"
 )
 
 type TextElement struct {
@@ -23,13 +24,14 @@ type ImageElement struct {
 }
 
 type GroupImageElement struct {
-	ImageId string
-	FileId  int64
-	Size    int32
-	Width   int32
-	Height  int32
-	Md5     []byte
-	Url     string
+	ImageId   string
+	FileId    int64
+	ImageType int32
+	Size      int32
+	Width     int32
+	Height    int32
+	Md5       []byte
+	Url       string
 }
 
 type VoiceElement struct {
@@ -59,8 +61,9 @@ type FriendImageElement struct {
 }
 
 type FaceElement struct {
-	Index int32
-	Name  string
+	Index      int32
+	NewSysFace bool
+	Name       string
 }
 
 type AtElement struct {
@@ -112,6 +115,12 @@ type RedBagElement struct {
 	Title   string
 }
 
+// TODO: 总之就是非常傻逼
+
+type GroupFlashImgElement struct {
+	ImageElement
+}
+
 type GroupFlashPicElement struct {
 	GroupImageElement
 }
@@ -119,6 +128,10 @@ type GroupFlashPicElement struct {
 type GroupShowPicElement struct {
 	GroupImageElement
 	EffectId int32
+}
+
+type FriendFlashImgElement struct {
+	ImageElement
 }
 
 type FriendFlashPicElement struct {
@@ -143,21 +156,30 @@ func NewImage(data []byte) *ImageElement {
 	}
 }
 
-func NewGroupImage(id string, md5 []byte, fid int64, size, width, height int32) *GroupImageElement {
+func NewGroupImage(id string, md5 []byte, fid int64, size, width, height, imageType int32) *GroupImageElement {
 	return &GroupImageElement{
-		ImageId: id,
-		FileId:  fid,
-		Md5:     md5,
-		Size:    size,
-		Width:   width,
-		Height:  height,
-		Url:     "http://gchat.qpic.cn/gchatpic_new/1/0-0-" + strings.ReplaceAll(binary.CalculateImageResourceId(md5)[1:37], "-", "") + "/0?term=2",
+		ImageId:   id,
+		FileId:    fid,
+		Md5:       md5,
+		Size:      size,
+		ImageType: imageType,
+		Width:     width,
+		Height:    height,
+		Url:       "http://gchat.qpic.cn/gchatpic_new/1/0-0-" + strings.ReplaceAll(binary.CalculateImageResourceId(md5)[1:37], "-", "") + "/0?term=2",
 	}
 }
 
 func NewFace(index int32) *FaceElement {
 	name := faceMap[int(index)]
 	if name == "" {
+		name = newSysFaceMap[int(index)]
+		if name != "" {
+			return &FaceElement{
+				Index:      index,
+				NewSysFace: true,
+				Name:       name,
+			}
+		}
 		name = "未知表情"
 	}
 	return &FaceElement{
@@ -233,6 +255,14 @@ func (e *TextElement) Type() ElementType {
 }
 
 func (e *ImageElement) Type() ElementType {
+	return Image
+}
+
+func (e *GroupFlashImgElement) Type() ElementType {
+	return Image
+}
+
+func (e *FriendFlashImgElement) Type() ElementType {
 	return Image
 }
 
@@ -447,4 +477,23 @@ var faceMap = map[int]string{
 	208: "小样儿",
 	210: "飙泪",
 	211: "我不看",
+	247: "口罩护体",
+}
+
+var newSysFaceMap = map[int]string{
+	260: "搬砖中",
+	261: "忙到飞起",
+	262: "脑阔疼",
+	263: "沧桑",
+	264: "捂脸",
+	265: "辣眼睛",
+	266: "哦呦",
+	267: "头秃",
+	268: "问号脸",
+	269: "暗中观察",
+	270: "emm",
+	271: "吃瓜",
+	272: "呵呵哒",
+	273: "我酸了",
+	277: "汪汪",
 }

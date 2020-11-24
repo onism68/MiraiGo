@@ -2,9 +2,11 @@ package client
 
 import (
 	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"github.com/Mrs4s/MiraiGo/binary"
+	"github.com/Mrs4s/MiraiGo/binary/jce"
 	devinfo "github.com/Mrs4s/MiraiGo/client/pb"
 	"github.com/Mrs4s/MiraiGo/client/pb/msg"
 	"github.com/Mrs4s/MiraiGo/client/pb/oidb"
@@ -12,7 +14,10 @@ import (
 	"github.com/Mrs4s/MiraiGo/utils"
 	"google.golang.org/protobuf/proto"
 	"math/rand"
+	"net"
 	"sort"
+	"strings"
+	"time"
 )
 
 type DeviceInfo struct {
@@ -68,12 +73,12 @@ type groupMessageBuilder struct {
 }
 
 type versionInfo struct {
-	ApkId           string
-	AppId           uint32
-	SortVersionName string
-	BuildTime       uint32
 	ApkSign         []byte
+	ApkId           string
+	SortVersionName string
 	SdkVersion      string
+	AppId           uint32
+	BuildTime       uint32
 	SSOVersion      uint32
 	MiscBitmap      uint32
 	SubSigmap       uint32
@@ -102,7 +107,7 @@ var SystemDeviceInfo = &DeviceInfo{
 	IMEI:        "468356291846738",
 	AndroidId:   []byte("MIRAI.123456.001"),
 	APN:         []byte("wifi"),
-	Protocol:    AndroidPad,
+	Protocol:    IPad,
 	Version: &Version{
 		Incremental: []byte("5891938"),
 		Release:     []byte("10"),
@@ -167,10 +172,23 @@ func genVersionInfo(p ClientProtocol) *versionInfo {
 			SubSigmap:       0x10400,
 			MainSigMap:      34869472,
 		}
-	case AndroidPad: // Dumped from qq-hd v5.8.9
+	case IPad:
 		return &versionInfo{
 			ApkId:           "com.tencent.minihd.qq",
-			AppId:           537065549,
+			AppId:           537065739,
+			SortVersionName: "5.8.9",
+			BuildTime:       1595836208,
+			ApkSign:         []byte{170, 57, 120, 244, 31, 217, 111, 249, 145, 74, 102, 158, 24, 100, 116, 199},
+			SdkVersion:      "6.0.0.2433",
+			SSOVersion:      12,
+			MiscBitmap:      150470524,
+			SubSigmap:       66560,
+			MainSigMap:      1970400,
+		}
+	case MacOS:
+		return &versionInfo{
+			ApkId:           "com.tencent.minihd.qq",
+			AppId:           537064315,
 			SortVersionName: "5.8.9",
 			BuildTime:       1595836208,
 			ApkSign:         []byte{170, 57, 120, 244, 31, 217, 111, 249, 145, 74, 102, 158, 24, 100, 116, 199},
@@ -197,7 +215,7 @@ func (info *DeviceInfo) ToJson() []byte {
 		IMEI:        info.IMEI,
 		Protocol: func() int {
 			switch info.Protocol {
-			case AndroidPad:
+			case IPad:
 				return 0
 			case AndroidPhone:
 				return 1
@@ -233,8 +251,10 @@ func (info *DeviceInfo) ReadJson(d []byte) error {
 		info.Protocol = AndroidPhone
 	case 2:
 		info.Protocol = AndroidWatch
+	case 3:
+		info.Protocol = MacOS
 	default:
-		info.Protocol = AndroidPad
+		info.Protocol = IPad
 	}
 	SystemDeviceInfo.GenNewGuid()
 	SystemDeviceInfo.GenNewTgtgtKey()
@@ -272,13 +292,72 @@ func (info *DeviceInfo) GenDeviceInfoData() []byte {
 	return data
 }
 
+func getSSOAddress() ([]*net.TCPAddr, error) {
+	protocol := genVersionInfo(SystemDeviceInfo.Protocol)
+	key, _ := hex.DecodeString("F0441F5FF42DA58FDCF7949ABA62D411")
+	payload := jce.NewJceWriter(). // see ServerConfig.d
+					WriteInt64(0, 1).WriteInt64(0, 2).WriteByte(1, 3).
+					WriteString("00000", 4).WriteInt32(100, 5).
+					WriteInt32(int32(protocol.AppId), 6).WriteString(SystemDeviceInfo.IMEI, 7).
+					WriteInt64(0, 8).WriteInt64(0, 9).WriteInt64(0, 10).
+					WriteInt64(0, 11).WriteByte(0, 12).WriteInt64(0, 13).WriteByte(1, 14).Bytes()
+	buf := &jce.RequestDataVersion2{
+		Map: map[string]map[string][]byte{"HttpServerListReq": {"ConfigHttp.HttpServerListReq": packUniRequestData(payload)}},
+	}
+	pkt := &jce.RequestPacket{
+		IVersion:     2,
+		SServantName: "ConfigHttp",
+		SFuncName:    "HttpServerListReq",
+		SBuffer:      buf.ToBytes(),
+	}
+	tea := binary.NewTeaCipher(key)
+	rsp, err := utils.HttpPostBytes("https://configsvr.msf.3g.qq.com/configsvr/serverlist.jsp", tea.Encrypt(binary.NewWriterF(func(w *binary.Writer) {
+		w.WriteIntLvPacket(0, func(w *binary.Writer) {
+			w.Write(pkt.ToBytes())
+		})
+	})))
+	if err != nil {
+		return nil, err
+	}
+	rspPkt := &jce.RequestPacket{}
+	data := &jce.RequestDataVersion2{}
+	rspPkt.ReadFrom(jce.NewJceReader(tea.Decrypt(rsp)[4:]))
+	data.ReadFrom(jce.NewJceReader(rspPkt.SBuffer))
+	reader := jce.NewJceReader(data.Map["HttpServerListRes"]["ConfigHttp.HttpServerListRes"][1:])
+	servers := []jce.SsoServerInfo{}
+	reader.ReadSlice(&servers, 2)
+	var adds []*net.TCPAddr
+	for _, s := range servers {
+		if strings.Contains(s.Server, "com") {
+			continue
+		}
+		adds = append(adds, &net.TCPAddr{
+			IP:   net.ParseIP(s.Server),
+			Port: int(s.Port),
+		})
+	}
+	return adds, nil
+}
+
+func qualityTest(addr *net.TCPAddr) (int64, error) {
+	// see QualityTestManager
+	start := time.Now()
+	conn, err := net.DialTimeout("tcp", addr.String(), time.Second*5)
+	if err != nil {
+		return 0, err
+	}
+	_ = conn.Close()
+	end := time.Now()
+	return end.Sub(start).Milliseconds(), nil
+}
+
 func (c *QQClient) parsePrivateMessage(msg *msg.Message) *message.PrivateMessage {
-	friend := c.FindFriend(msg.Head.FromUin)
+	friend := c.FindFriend(msg.Head.GetFromUin())
 	var sender *message.Sender
 	if friend == nil {
 		sender = &message.Sender{
-			Uin:      msg.Head.FromUin,
-			Nickname: msg.Head.FromNick,
+			Uin:      msg.Head.GetFromUin(),
+			Nickname: msg.Head.GetFromNick(),
 			IsFriend: false,
 		}
 	} else {
@@ -288,23 +367,35 @@ func (c *QQClient) parsePrivateMessage(msg *msg.Message) *message.PrivateMessage
 		}
 	}
 	ret := &message.PrivateMessage{
-		Id:       msg.Head.MsgSeq,
-		Target:   c.Uin,
-		Time:     msg.Head.MsgTime,
-		Sender:   sender,
-		Elements: message.ParseMessageElems(msg.Body.RichText.Elems),
+		Id:     msg.Head.GetMsgSeq(),
+		Target: c.Uin,
+		Time:   msg.Head.GetMsgTime(),
+		Sender: sender,
+		Elements: func() []message.IMessageElement {
+			if msg.Body.RichText.Ptt != nil {
+				return []message.IMessageElement{
+					&message.VoiceElement{
+						Name: msg.Body.RichText.Ptt.GetFileName(),
+						Md5:  msg.Body.RichText.Ptt.FileMd5,
+						Size: msg.Body.RichText.Ptt.GetFileSize(),
+						Url:  string(msg.Body.RichText.Ptt.DownPara),
+					},
+				}
+			}
+			return message.ParseMessageElems(msg.Body.RichText.Elems)
+		}(),
 	}
 	if msg.Body.RichText.Attr != nil {
-		ret.InternalId = msg.Body.RichText.Attr.Random
+		ret.InternalId = msg.Body.RichText.Attr.GetRandom()
 	}
 	return ret
 }
 
 func (c *QQClient) parseTempMessage(msg *msg.Message) *message.TempMessage {
-	group := c.FindGroupByUin(msg.Head.C2CTmpMsgHead.GroupUin)
-	mem := group.FindMember(msg.Head.FromUin)
+	group := c.FindGroupByUin(msg.Head.C2CTmpMsgHead.GetGroupUin())
+	mem := group.FindMember(msg.Head.GetFromUin())
 	sender := &message.Sender{
-		Uin:      msg.Head.FromUin,
+		Uin:      msg.Head.GetFromUin(),
 		Nickname: "Unknown",
 		IsFriend: false,
 	}
@@ -313,7 +404,7 @@ func (c *QQClient) parseTempMessage(msg *msg.Message) *message.TempMessage {
 		sender.CardName = mem.CardName
 	}
 	return &message.TempMessage{
-		Id:        msg.Head.MsgSeq,
+		Id:        msg.Head.GetMsgSeq(),
 		GroupCode: group.Code,
 		GroupName: group.Name,
 		Sender:    sender,
@@ -322,10 +413,10 @@ func (c *QQClient) parseTempMessage(msg *msg.Message) *message.TempMessage {
 }
 
 func (c *QQClient) parseGroupMessage(m *msg.Message) *message.GroupMessage {
-	group := c.FindGroup(m.Head.GroupInfo.GroupCode)
+	group := c.FindGroup(m.Head.GroupInfo.GetGroupCode())
 	if group == nil {
 		c.Debug("sync group %v.", m.Head.GroupInfo.GroupCode)
-		info, err := c.GetGroupInfo(m.Head.GroupInfo.GroupCode)
+		info, err := c.GetGroupInfo(m.Head.GroupInfo.GetGroupCode())
 		if err != nil {
 			c.Error("error to sync group %v : %v", m.Head.GroupInfo.GroupCode, err)
 			return nil
@@ -355,9 +446,9 @@ func (c *QQClient) parseGroupMessage(m *msg.Message) *message.GroupMessage {
 			IsFriend: false,
 		}
 	} else {
-		mem := group.FindMember(m.Head.FromUin)
+		mem := group.FindMember(m.Head.GetFromUin())
 		if mem == nil {
-			info, _ := c.getMemberInfo(group.Code, m.Head.FromUin)
+			info, _ := c.getMemberInfo(group.Code, m.Head.GetFromUin())
 			if info == nil {
 				return nil
 			}
@@ -377,25 +468,25 @@ func (c *QQClient) parseGroupMessage(m *msg.Message) *message.GroupMessage {
 	}
 	var g *message.GroupMessage
 	g = &message.GroupMessage{
-		Id:        m.Head.MsgSeq,
+		Id:        m.Head.GetMsgSeq(),
 		GroupCode: group.Code,
 		GroupName: string(m.Head.GroupInfo.GroupName),
 		Sender:    sender,
-		Time:      m.Head.MsgTime,
+		Time:      m.Head.GetMsgTime(),
 		Elements:  message.ParseMessageElems(m.Body.RichText.Elems),
 	}
 	var extInfo *msg.ExtraInfo
 	// pre parse
 	for _, elem := range m.Body.RichText.Elems {
 		// is rich long msg
-		if elem.GeneralFlags != nil && elem.GeneralFlags.LongTextResid != "" {
-			if f := c.GetForwardMessage(elem.GeneralFlags.LongTextResid); f != nil && len(f.Nodes) == 1 {
+		if elem.GeneralFlags != nil && elem.GeneralFlags.GetLongTextResid() != "" {
+			if f := c.GetForwardMessage(elem.GeneralFlags.GetLongTextResid()); f != nil && len(f.Nodes) == 1 {
 				g = &message.GroupMessage{
-					Id:        m.Head.MsgSeq,
+					Id:        m.Head.GetMsgSeq(),
 					GroupCode: group.Code,
 					GroupName: string(m.Head.GroupInfo.GroupName),
 					Sender:    sender,
-					Time:      m.Head.MsgTime,
+					Time:      m.Head.GetMsgTime(),
 					Elements:  f.Nodes[0].Message,
 				}
 			}
@@ -405,8 +496,8 @@ func (c *QQClient) parseGroupMessage(m *msg.Message) *message.GroupMessage {
 		}
 	}
 	if !sender.IsAnonymous() {
-		mem := group.FindMember(m.Head.FromUin)
-		groupCard := m.Head.GroupInfo.GroupCard
+		mem := group.FindMember(m.Head.GetFromUin())
+		groupCard := m.Head.GroupInfo.GetGroupCard()
 		if extInfo != nil && len(extInfo.GroupCard) > 0 && extInfo.GroupCard[0] == 0x0A {
 			buf := oidb.D8FCCommCardNameBuf{}
 			if err := proto.Unmarshal(extInfo.GroupCard, &buf); err == nil && len(buf.RichCardName) > 0 {
@@ -435,22 +526,22 @@ func (c *QQClient) parseGroupMessage(m *msg.Message) *message.GroupMessage {
 	if m.Body.RichText.Ptt != nil {
 		g.Elements = []message.IMessageElement{
 			&message.VoiceElement{
-				Name: m.Body.RichText.Ptt.FileName,
+				Name: m.Body.RichText.Ptt.GetFileName(),
 				Md5:  m.Body.RichText.Ptt.FileMd5,
-				Size: m.Body.RichText.Ptt.FileSize,
+				Size: m.Body.RichText.Ptt.GetFileSize(),
 				Url:  "http://grouptalk.c2c.qq.com" + string(m.Body.RichText.Ptt.DownPara),
 			},
 		}
 	}
 	if m.Body.RichText.Attr != nil {
-		g.InternalId = m.Body.RichText.Attr.Random
+		g.InternalId = m.Body.RichText.Attr.GetRandom()
 	}
 	return g
 }
 
 func (b *groupMessageBuilder) build() *msg.Message {
 	sort.Slice(b.MessageSlices, func(i, j int) bool {
-		return b.MessageSlices[i].Content.PkgIndex < b.MessageSlices[j].Content.PkgIndex
+		return b.MessageSlices[i].Content.GetPkgIndex() < b.MessageSlices[j].Content.GetPkgIndex()
 	})
 	base := b.MessageSlices[0]
 	for _, m := range b.MessageSlices[1:] {
@@ -459,7 +550,7 @@ func (b *groupMessageBuilder) build() *msg.Message {
 	return base
 }
 
-func packRequestDataV3(data []byte) (r []byte) {
+func packUniRequestData(data []byte) (r []byte) {
 	r = append([]byte{0x0A}, data...)
 	r = append(r, 0x0B)
 	return

@@ -2,16 +2,17 @@ package message
 
 import (
 	"crypto/md5"
-	"github.com/Mrs4s/MiraiGo/binary"
-	"github.com/Mrs4s/MiraiGo/client/pb/msg"
-	"github.com/Mrs4s/MiraiGo/utils"
-	"github.com/golang/protobuf/proto"
-	"github.com/tidwall/gjson"
 	"math"
 	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/Mrs4s/MiraiGo/binary"
+	"github.com/Mrs4s/MiraiGo/client/pb/msg"
+	"github.com/Mrs4s/MiraiGo/utils"
+	"github.com/golang/protobuf/proto"
+	"github.com/tidwall/gjson"
 )
 
 type (
@@ -101,15 +102,20 @@ const (
 	LightApp
 	RedBag
 
-	SweetWink      GroupGift = 285
-	HappyCola      GroupGift = 289
-	LuckyBracelet  GroupGift = 290
-	Cappuccino     GroupGift = 299
-	CatWatch       GroupGift = 302
-	FleeceGloves   GroupGift = 307
-	RainbowCandy   GroupGift = 308
-	Stronger       GroupGift = 313
-	LoveMicrophone GroupGift = 367
+	HoldingYourHand GroupGift = 280
+	CuteCat         GroupGift = 281
+	MysteryMask     GroupGift = 284
+	SweetWink       GroupGift = 285
+	ImBusy          GroupGift = 286
+	HappyCola       GroupGift = 289
+	LuckyBracelet   GroupGift = 290
+	Cappuccino      GroupGift = 299
+	CatWatch        GroupGift = 302
+	FleeceGloves    GroupGift = 307
+	RainbowCandy    GroupGift = 308
+	LoveMask        GroupGift = 312
+	Stronger        GroupGift = 313
+	LoveMicrophone  GroupGift = 367
 )
 
 func (s *Sender) IsAnonymous() bool {
@@ -127,6 +133,9 @@ func (msg *PrivateMessage) ToString() (res string) {
 			res += e.Content
 		case *ImageElement:
 			res += "[Image:" + e.Filename + "]"
+		case *FriendFlashImgElement:
+			// NOTE: ignore other components
+			return "[Image (flash):" + e.Filename + "]"
 		case *FaceElement:
 			res += "[" + e.Name + "]"
 		case *AtElement:
@@ -163,6 +172,9 @@ func (msg *GroupMessage) ToString() (res string) {
 			res += "[" + e.Name + "]"
 		case *GroupImageElement:
 			res += "[Image: " + e.ImageId + "]"
+		case *GroupFlashImgElement:
+			// NOTE: ignore other components
+			return "[Image (flash):" + e.Filename + "]"
 		case *AtElement:
 			res += e.Display
 		case *RedBagElement:
@@ -263,9 +275,9 @@ func ToProtoElems(elems []IMessageElement, generalFlags bool) (r []*msg.Elem) {
 			r = append(r, &msg.Elem{
 				SrcMsg: &msg.SourceMsg{
 					OrigSeqs:  []int32{reply.ReplySeq},
-					SenderUin: reply.Sender,
-					Time:      reply.Time,
-					Flag:      1,
+					SenderUin: &reply.Sender,
+					Time:      &reply.Time,
+					Flag:      proto.Int32(1),
 					Elems:     ToSrcProtoElems(reply.Elements),
 					RichMsg:   []byte{},
 					PbReserve: []byte{},
@@ -288,8 +300,8 @@ func ToProtoElems(elems []IMessageElement, generalFlags bool) (r []*msg.Elem) {
 				if e.SubType == "Long" {
 					r = append(r, &msg.Elem{
 						GeneralFlags: &msg.GeneralFlags{
-							LongTextFlag:  1,
-							LongTextResid: e.ResId,
+							LongTextFlag:  proto.Int32(1),
+							LongTextResid: &e.ResId,
 							PbReserve:     []byte{0x78, 0x00, 0xF8, 0x01, 0x00, 0xC8, 0x02, 0x00},
 						},
 					})
@@ -319,7 +331,7 @@ func ToSrcProtoElems(elems []IMessageElement) (r []*msg.Elem) {
 		case *ImageElement, *GroupImageElement, *FriendImageElement:
 			r = append(r, &msg.Elem{
 				Text: &msg.Text{
-					Str: "[图片]",
+					Str: proto.String("[图片]"),
 				},
 			})
 		default:
@@ -336,8 +348,8 @@ func ParseMessageElems(elems []*msg.Elem) []IMessageElement {
 			if len(elem.SrcMsg.OrigSeqs) != 0 {
 				r := &ReplyElement{
 					ReplySeq: elem.SrcMsg.OrigSeqs[0],
-					Time:     elem.SrcMsg.Time,
-					Sender:   elem.SrcMsg.SenderUin,
+					Time:     elem.SrcMsg.GetTime(),
+					Sender:   elem.SrcMsg.GetSenderUin(),
 					Elements: ParseMessageElems(elem.SrcMsg.Elems),
 				}
 				res = append(res, r)
@@ -345,7 +357,7 @@ func ParseMessageElems(elems []*msg.Elem) []IMessageElement {
 			continue
 		}
 		if elem.TransElemInfo != nil {
-			if elem.TransElemInfo.ElemType == 24 { // QFile
+			if elem.TransElemInfo.GetElemType() == 24 { // QFile
 				i3 := len(elem.TransElemInfo.ElemValue)
 				r := binary.NewReader(elem.TransElemInfo.ElemValue)
 				if i3 > 3 {
@@ -366,23 +378,23 @@ func ParseMessageElems(elems []*msg.Elem) []IMessageElement {
 			}
 		}
 		if elem.LightApp != nil && len(elem.LightApp.Data) > 1 {
-			var content string
+			var content []byte
 			if elem.LightApp.Data[0] == 0 {
-				content = string(elem.LightApp.Data[1:])
+				content = elem.LightApp.Data[1:]
 			}
 			if elem.LightApp.Data[0] == 1 {
-				content = string(binary.ZlibUncompress(elem.LightApp.Data[1:]))
+				content = binary.ZlibUncompress(elem.LightApp.Data[1:])
 			}
-			if content != "" {
+			if len(content) > 0 && len(content) < 1024*1024*1024 { // 解析出错 or 非法内容
 				// TODO: 解析具体的APP
-				return append(res, &LightAppElement{Content: content})
+				return append(res, &LightAppElement{Content: string(content)})
 			}
 		}
 		if elem.VideoFile != nil {
 			return append(res, &ShortVideoElement{
 				Name: string(elem.VideoFile.FileName),
 				Uuid: elem.VideoFile.FileUuid,
-				Size: elem.VideoFile.FileSize,
+				Size: elem.VideoFile.GetFileSize(),
 				Md5:  elem.VideoFile.FileMd5,
 			})
 		}
@@ -390,16 +402,16 @@ func ParseMessageElems(elems []*msg.Elem) []IMessageElement {
 			if len(elem.Text.Attr6Buf) == 0 {
 				res = append(res, NewText(func() string {
 					// 这么处理应该没问题
-					if strings.Contains(elem.Text.Str, "\r") && !strings.Contains(elem.Text.Str, "\r\n") {
-						return strings.ReplaceAll(elem.Text.Str, "\r", "\r\n")
+					if strings.Contains(elem.Text.GetStr(), "\r") && !strings.Contains(elem.Text.GetStr(), "\r\n") {
+						return strings.ReplaceAll(elem.Text.GetStr(), "\r", "\r\n")
 					}
-					return elem.Text.Str
+					return elem.Text.GetStr()
 				}()))
 			} else {
 				att6 := binary.NewReader(elem.Text.Attr6Buf)
 				att6.ReadBytes(7)
 				target := int64(uint32(att6.ReadInt32()))
-				res = append(res, NewAt(target, elem.Text.Str))
+				res = append(res, NewAt(target, elem.Text.GetStr()))
 			}
 		}
 		if elem.RichMsg != nil {
@@ -411,16 +423,16 @@ func ParseMessageElems(elems []*msg.Elem) []IMessageElement {
 				content = string(binary.ZlibUncompress(elem.RichMsg.Template1[1:]))
 			}
 			if content != "" {
-				if elem.RichMsg.ServiceId == 35 {
+				if elem.RichMsg.GetServiceId() == 35 {
 					reg := regexp.MustCompile(`m_resid="(\w+?.*?)"`)
 					res = append(res, &ForwardElement{ResId: reg.FindAllStringSubmatch(content, -1)[0][1]})
 					continue
 				}
-				if elem.RichMsg.ServiceId == 33 {
+				if elem.RichMsg.GetServiceId() == 33 {
 					continue // 前面一个 elem 已经解析到链接
 				}
 				if isOk := strings.Contains(content, "<?xml"); isOk {
-					res = append(res, NewRichXml(content, int64(elem.RichMsg.ServiceId)))
+					res = append(res, NewRichXml(content, int64(elem.RichMsg.GetServiceId())))
 					continue
 				} else {
 					if gjson.Valid(content) {
@@ -432,69 +444,82 @@ func ParseMessageElems(elems []*msg.Elem) []IMessageElement {
 			}
 		}
 		if elem.CustomFace != nil {
+			if len(elem.CustomFace.Md5) == 0 {
+				continue
+			}
 			res = append(res, &ImageElement{
-				Filename: elem.CustomFace.FilePath,
-				Size:     elem.CustomFace.Size,
-				Width:    elem.CustomFace.Width,
-				Height:   elem.CustomFace.Height,
+				Filename: elem.CustomFace.GetFilePath(),
+				Size:     elem.CustomFace.GetSize(),
+				Width:    elem.CustomFace.GetWidth(),
+				Height:   elem.CustomFace.GetHeight(),
 				Url: func() string {
-					if elem.CustomFace.OrigUrl == "" {
+					if elem.CustomFace.GetOrigUrl() == "" {
 						return "http://gchat.qpic.cn/gchatpic_new/0/0-0-" + strings.ReplaceAll(binary.CalculateImageResourceId(elem.CustomFace.Md5)[1:37], "-", "") + "/0?term=2"
 					}
-					return "http://gchat.qpic.cn" + elem.CustomFace.OrigUrl
+					return "http://gchat.qpic.cn" + elem.CustomFace.GetOrigUrl()
 				}(),
 				Md5: elem.CustomFace.Md5,
 			})
 		}
 		if elem.NotOnlineImage != nil {
 			var img string
-			if elem.NotOnlineImage.OrigUrl != "" {
-				img = "http://c2cpicdw.qpic.cn" + elem.NotOnlineImage.OrigUrl
+			if elem.NotOnlineImage.GetOrigUrl() != "" {
+				img = "http://c2cpicdw.qpic.cn" + elem.NotOnlineImage.GetOrigUrl()
 			} else {
-				img = "http://c2cpicdw.qpic.cn/offpic_new/0/" + elem.NotOnlineImage.ResId + "/0?term=2"
+				img = "http://c2cpicdw.qpic.cn/offpic_new/0/" + elem.NotOnlineImage.GetResId() + "/0?term=2"
 			}
 			res = append(res, &ImageElement{
-				Filename: elem.NotOnlineImage.FilePath,
-				Size:     elem.NotOnlineImage.FileLen,
+				Filename: elem.NotOnlineImage.GetFilePath(),
+				Size:     elem.NotOnlineImage.GetFileLen(),
 				Url:      img,
 				Md5:      elem.NotOnlineImage.PicMd5,
 			})
 		}
 		if elem.QQWalletMsg != nil && elem.QQWalletMsg.AioBody != nil {
-			msgType := elem.QQWalletMsg.AioBody.MsgType
+			msgType := elem.QQWalletMsg.AioBody.GetMsgType()
 			if msgType == 2 || msgType == 3 || msgType == 6 {
 				return []IMessageElement{
 					&RedBagElement{
 						MsgType: RedBagMessageType(msgType),
-						Title:   elem.QQWalletMsg.AioBody.Receiver.Title,
+						Title:   elem.QQWalletMsg.AioBody.Receiver.GetTitle(),
 					},
 				}
 			}
 		}
 		if elem.Face != nil {
-			res = append(res, NewFace(elem.Face.Index))
+			res = append(res, NewFace(elem.Face.GetIndex()))
 		}
 		if elem.CommonElem != nil {
-			switch elem.CommonElem.ServiceType {
+			switch elem.CommonElem.GetServiceType() {
 			case 3:
 				flash := &msg.MsgElemInfoServtype3{}
 				_ = proto.Unmarshal(elem.CommonElem.PbElem, flash)
 				if flash.FlashTroopPic != nil {
-					res = append(res, &ImageElement{
-						Filename: flash.FlashTroopPic.FilePath,
-						Size:     flash.FlashTroopPic.Size,
-						Width:    flash.FlashTroopPic.Width,
-						Height:   flash.FlashTroopPic.Height,
-						Md5:      flash.FlashTroopPic.Md5,
+					res = append(res, &GroupFlashImgElement{
+						ImageElement{
+							Filename: flash.FlashTroopPic.GetFilePath(),
+							Size:     flash.FlashTroopPic.GetSize(),
+							Width:    flash.FlashTroopPic.GetWidth(),
+							Height:   flash.FlashTroopPic.GetHeight(),
+							Md5:      flash.FlashTroopPic.Md5,
+						},
 					})
+					return res
 				}
 				if flash.FlashC2CPic != nil {
-					res = append(res, &ImageElement{
-						Filename: flash.FlashC2CPic.FilePath,
-						Size:     flash.FlashC2CPic.FileLen,
-						Md5:      flash.FlashC2CPic.PicMd5,
+					res = append(res, &GroupFlashImgElement{
+						ImageElement{
+							Filename: flash.FlashC2CPic.GetFilePath(),
+							Size:     flash.FlashC2CPic.GetFileLen(),
+							Md5:      flash.FlashC2CPic.PicMd5,
+						},
 					})
+					return res
 				}
+			case 33:
+				newSysFaceMsg := &msg.MsgElemInfoServtype33{}
+				_ = proto.Unmarshal(elem.CommonElem.PbElem, newSysFaceMsg)
+				res = append(res, NewFace(int32(newSysFaceMsg.GetIndex())))
 			}
 		}
 	}
@@ -506,19 +531,19 @@ func (forMsg *ForwardMessage) CalculateValidationData(seq, random int32, groupCo
 	for _, node := range forMsg.Nodes {
 		msgs = append(msgs, &msg.Message{
 			Head: &msg.MessageHead{
-				FromUin: node.SenderId,
-				MsgSeq:  seq,
-				MsgTime: node.Time,
-				MsgUid:  0x01000000000000000 | (int64(random) & 0xFFFFFFFF),
+				FromUin: &node.SenderId,
+				MsgSeq:  &seq,
+				MsgTime: &node.Time,
+				MsgUid:  proto.Int64(0x01000000000000000 | (int64(random) & 0xFFFFFFFF)),
 				MutiltransHead: &msg.MutilTransHead{
-					MsgId: 1,
+					MsgId: proto.Int32(1),
 				},
-				MsgType: 82,
+				MsgType: proto.Int32(82),
 				GroupInfo: &msg.GroupInfo{
-					GroupCode: groupCode,
+					GroupCode: &groupCode,
 					GroupRank: []byte{},
 					GroupName: []byte{},
-					GroupCard: node.SenderName,
+					GroupCard: &node.SenderName,
 				},
 			},
 			Body: &msg.MessageBody{
@@ -531,7 +556,7 @@ func (forMsg *ForwardMessage) CalculateValidationData(seq, random int32, groupCo
 	buf, _ := proto.Marshal(&msg.PbMultiMsgNew{Msg: msgs})
 	trans := &msg.PbMultiMsgTransmit{Msg: msgs, PbItemList: []*msg.PbMultiMsgItem{
 		{
-			FileName: "MultiMsg",
+			FileName: proto.String("MultiMsg"),
 			Buffer:   buf,
 		},
 	}}
@@ -552,6 +577,12 @@ func ToReadableString(m []IMessageElement) (r string) {
 			r += "/" + e.Name
 		case *GroupImageElement:
 			r += "[图片]"
+		// NOTE: flash pic is singular
+		// To be clarified
+		// case *GroupFlashImgElement:
+		// 	return "[闪照]"
+		// case *FriendFlashImgElement:
+		// 	return "[闪照]"
 		case *AtElement:
 			r += e.Display
 		}
