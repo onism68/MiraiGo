@@ -2,20 +2,44 @@ package client
 
 import (
 	"github.com/Mrs4s/MiraiGo/client/pb/msg"
+	"github.com/Mrs4s/MiraiGo/message"
 	"github.com/Mrs4s/MiraiGo/protocol/packets"
+	"github.com/pkg/errors"
 	"google.golang.org/protobuf/proto"
 )
 
 // 撤回相关处理逻辑
 
-func (c *QQClient) RecallGroupMessage(groupCode int64, msgId, msgInternalId int32) {
-	_, pkt := c.buildGroupRecallPacket(groupCode, msgId, msgInternalId)
-	_ = c.send(pkt)
+func (c *QQClient) RecallGroupMessage(groupCode int64, msgId, msgInternalId int32) error {
+	if m, _ := c.GetGroupMessages(groupCode, int64(msgId), int64(msgId)); len(m) > 0 {
+		content := m[0].OriginalObject.Content
+		if content.GetPkgNum() > 1 {
+			if m, err := c.GetGroupMessages(groupCode, int64(msgId-content.GetPkgIndex()-1), int64(msgId+(content.GetPkgNum()-content.GetPkgIndex()+1))); err == nil {
+				if flag, _ := c.internalGroupRecall(groupCode, msgInternalId, m); flag {
+					return nil
+				}
+			}
+		}
+	}
+	_, err := c.sendAndWait(c.buildGroupRecallPacket(groupCode, msgId, msgInternalId))
+	return err
 }
 
-func (c *QQClient) RecallPrivateMessage(uin, ts int64, msgId, msgInternalId int32) {
-	_, pkt := c.buildPrivateRecallPacket(uin, ts, msgId, msgInternalId)
-	_ = c.send(pkt)
+func (c *QQClient) internalGroupRecall(groupCode int64, msgInternalId int32, m []*message.GroupMessage) (flag bool, err error) {
+	for _, item := range m {
+		if item.InternalId == msgInternalId {
+			flag = true
+			if _, err := c.sendAndWait(c.buildGroupRecallPacket(groupCode, item.Id, item.InternalId)); err != nil {
+				return false, err
+			}
+		}
+	}
+	return flag, nil
+}
+
+func (c *QQClient) RecallPrivateMessage(uin, ts int64, msgId, msgInternalId int32) error {
+	_, err := c.sendAndWait(c.buildPrivateRecallPacket(uin, ts, msgId, msgInternalId))
+	return err
 }
 
 // PbMessageSvc.PbMsgWithDraw
@@ -63,4 +87,22 @@ func (c *QQClient) buildPrivateRecallPacket(uin, ts int64, msgSeq, random int32)
 	payload, _ := proto.Marshal(req)
 	packet := packets.BuildUniPacket(c.Uin, seq, "PbMessageSvc.PbMsgWithDraw", 1, c.OutGoingPacketSessionId, EmptyBytes, c.sigInfo.d2Key, payload)
 	return seq, packet
+}
+
+func decodeMsgWithDrawResponse(_ *QQClient, _ uint16, payload []byte) (interface{}, error) {
+	rsp := msg.MsgWithDrawResp{}
+	if err := proto.Unmarshal(payload, &rsp); err != nil {
+		return nil, errors.Wrap(err, "failed to unmarshal protobuf message")
+	}
+	if len(rsp.C2CWithDraw) > 0 {
+		if rsp.C2CWithDraw[0].GetErrMsg() != "" && rsp.C2CWithDraw[0].GetErrMsg() != "Success" {
+			return nil, errors.Errorf("recall error: %v msg: %v", rsp.C2CWithDraw[0].GetResult(), rsp.C2CWithDraw[0].GetErrMsg())
+		}
+	}
+	if len(rsp.GroupWithDraw) > 0 {
+		if rsp.GroupWithDraw[0].GetErrMsg() != "" && rsp.GroupWithDraw[0].GetErrMsg() != "Success" {
+			return nil, errors.Errorf("recall error: %v msg: %v", rsp.GroupWithDraw[0].GetResult(), rsp.GroupWithDraw[0].GetErrMsg())
+		}
+	}
+	return nil, nil
 }

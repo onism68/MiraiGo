@@ -12,8 +12,10 @@ import (
 	"github.com/Mrs4s/MiraiGo/client/pb/msg"
 	"github.com/Mrs4s/MiraiGo/utils"
 	"github.com/golang/protobuf/proto"
-	"github.com/tidwall/gjson"
+	jsoniter "github.com/json-iterator/go"
 )
+
+var json = jsoniter.ConfigFastest
 
 type (
 	PrivateMessage struct {
@@ -34,13 +36,14 @@ type (
 	}
 
 	GroupMessage struct {
-		Id         int32
-		InternalId int32
-		GroupCode  int64
-		GroupName  string
-		Sender     *Sender
-		Time       int32
-		Elements   []IMessageElement
+		Id             int32
+		InternalId     int32
+		GroupCode      int64
+		GroupName      string
+		Sender         *Sender
+		Time           int32
+		Elements       []IMessageElement
+		OriginalObject *msg.Message
 		//OriginalElements []*msg.Elem
 	}
 
@@ -59,20 +62,17 @@ type (
 		Message    []IMessageElement
 	}
 
-	RichMessage struct {
-		Title      string
-		Summary    string
-		Brief      string
-		Url        string
-		PictureUrl string
-		MusicUrl   string
+	Sender struct {
+		Uin           int64
+		Nickname      string
+		CardName      string
+		AnonymousInfo *AnonymousInfo
+		IsFriend      bool
 	}
 
-	Sender struct {
-		Uin      int64
-		Nickname string
-		CardName string
-		IsFriend bool
+	AnonymousInfo struct {
+		AnonymousId   string
+		AnonymousNick string
 	}
 
 	IMessageElement interface {
@@ -86,6 +86,15 @@ type (
 	ElementType int
 
 	GroupGift int
+)
+
+// MusicType values.
+const (
+	QQMusic    = iota // QQ音乐
+	CloudMusic        // 网易云音乐
+	MiguMusic         // 咪咕音乐
+	KugouMusic        // 酷狗音乐
+	KuwoMusic         // 酷我音乐
 )
 
 const (
@@ -226,7 +235,7 @@ func (msg *SendingMessage) ToFragmented() [][]IMessageElement {
 	for _, elem := range msg.Elements {
 		switch o := elem.(type) {
 		case *TextElement:
-			for _, text := range utils.ChunkString(o.Content, 220) {
+			for _, text := range utils.ChunkString(o.Content, 80) {
 				fragmented = append(fragmented, []IMessageElement{NewText(text)})
 			}
 		default:
@@ -251,7 +260,7 @@ func EstimateLength(elems []IMessageElement, limit int) int {
 		case *ReplyElement:
 			sum += 444 + EstimateLength(e.Elements, left)
 		case *ImageElement, *GroupImageElement, *FriendImageElement:
-			sum += 260
+			sum += 100
 		default:
 			sum += utils.ChineseLength(ToReadableString([]IMessageElement{elem}), left)
 		}
@@ -285,9 +294,18 @@ func ToProtoElems(elems []IMessageElement, generalFlags bool) (r []*msg.Elem) {
 					TroopName: []byte{},
 				},
 			})
+			if len(elems) > 1 {
+				if elems[0].Type() == Image || elems[1].Type() == Image {
+					r = append(r, &msg.Elem{Text: &msg.Text{Str: proto.String(" ")}})
+				}
+			}
 		}
 	}
 	for _, elem := range elems {
+		if e, ok := elem.(*ShortVideoElement); ok {
+			r = e.Pack()
+			break
+		}
 		if e, ok := elem.(IRichMessageElement); ok {
 			r = append(r, e.Pack()...)
 		}
@@ -354,7 +372,6 @@ func ParseMessageElems(elems []*msg.Elem) []IMessageElement {
 				}
 				res = append(res, r)
 			}
-			continue
 		}
 		if elem.TransElemInfo != nil {
 			if elem.TransElemInfo.GetElemType() == 24 { // QFile
@@ -391,12 +408,16 @@ func ParseMessageElems(elems []*msg.Elem) []IMessageElement {
 			}
 		}
 		if elem.VideoFile != nil {
-			return append(res, &ShortVideoElement{
-				Name: string(elem.VideoFile.FileName),
-				Uuid: elem.VideoFile.FileUuid,
-				Size: elem.VideoFile.GetFileSize(),
-				Md5:  elem.VideoFile.FileMd5,
-			})
+			return []IMessageElement{
+				&ShortVideoElement{
+					Name:      string(elem.VideoFile.FileName),
+					Uuid:      elem.VideoFile.FileUuid,
+					Size:      elem.VideoFile.GetFileSize(),
+					ThumbSize: elem.VideoFile.GetThumbFileSize(),
+					Md5:       elem.VideoFile.FileMd5,
+					ThumbMd5:  elem.VideoFile.GetThumbFileMd5(),
+				},
+			}
 		}
 		if elem.Text != nil {
 			if len(elem.Text.Attr6Buf) == 0 {
@@ -425,8 +446,11 @@ func ParseMessageElems(elems []*msg.Elem) []IMessageElement {
 			if content != "" {
 				if elem.RichMsg.GetServiceId() == 35 {
 					reg := regexp.MustCompile(`m_resid="(\w+?.*?)"`)
-					res = append(res, &ForwardElement{ResId: reg.FindAllStringSubmatch(content, -1)[0][1]})
-					continue
+					sub := reg.FindAllStringSubmatch(content, -1)
+					if len(sub) > 0 && len(sub[0]) > 1 {
+						res = append(res, &ForwardElement{ResId: reg.FindAllStringSubmatch(content, -1)[0][1]})
+						continue
+					}
 				}
 				if elem.RichMsg.GetServiceId() == 33 {
 					continue // 前面一个 elem 已经解析到链接
@@ -435,7 +459,7 @@ func ParseMessageElems(elems []*msg.Elem) []IMessageElement {
 					res = append(res, NewRichXml(content, int64(elem.RichMsg.GetServiceId())))
 					continue
 				} else {
-					if gjson.Valid(content) {
+					if json.Valid(utils.S2B(content)) {
 						res = append(res, NewRichJson(content))
 						continue
 					}
@@ -527,6 +551,42 @@ func ParseMessageElems(elems []*msg.Elem) []IMessageElement {
 }
 
 func (forMsg *ForwardMessage) CalculateValidationData(seq, random int32, groupCode int64) ([]byte, []byte) {
+	msgs := forMsg.packForwardMsg(seq, random, groupCode)
+	trans := &msg.PbMultiMsgTransmit{Msg: msgs, PbItemList: []*msg.PbMultiMsgItem{
+		{
+			FileName: proto.String("MultiMsg"),
+			Buffer:   &msg.PbMultiMsgNew{Msg: msgs},
+		},
+	}}
+	b, _ := proto.Marshal(trans)
+	data := binary.GZipCompress(b)
+	hash := md5.Sum(data)
+	return data, hash[:]
+}
+
+// CalculateValidationDataForward 屎代码
+func (forMsg *ForwardMessage) CalculateValidationDataForward(seq, random int32, groupCode int64) ([]byte, []byte, []*msg.PbMultiMsgItem) {
+	msgs := forMsg.packForwardMsg(seq, random, groupCode)
+	trans := &msg.PbMultiMsgTransmit{Msg: msgs, PbItemList: []*msg.PbMultiMsgItem{
+		{
+			FileName: proto.String("MultiMsg"),
+			Buffer:   &msg.PbMultiMsgNew{Msg: msgs},
+		},
+	}}
+	for _, node := range forMsg.Nodes {
+		for _, message := range node.Message {
+			if forwardElement, ok := message.(*ForwardElement); ok {
+				trans.PbItemList = append(trans.PbItemList, forwardElement.Items...)
+			}
+		}
+	}
+	b, _ := proto.Marshal(trans)
+	data := binary.GZipCompress(b)
+	hash := md5.Sum(data)
+	return data, hash[:], trans.PbItemList
+}
+
+func (forMsg *ForwardMessage) packForwardMsg(seq int32, random int32, groupCode int64) []*msg.Message {
 	var msgs []*msg.Message
 	for _, node := range forMsg.Nodes {
 		msgs = append(msgs, &msg.Message{
@@ -553,17 +613,7 @@ func (forMsg *ForwardMessage) CalculateValidationData(seq, random int32, groupCo
 			},
 		})
 	}
-	buf, _ := proto.Marshal(&msg.PbMultiMsgNew{Msg: msgs})
-	trans := &msg.PbMultiMsgTransmit{Msg: msgs, PbItemList: []*msg.PbMultiMsgItem{
-		{
-			FileName: proto.String("MultiMsg"),
-			Buffer:   buf,
-		},
-	}}
-	b, _ := proto.Marshal(trans)
-	data := binary.GZipCompress(b)
-	hash := md5.Sum(data)
-	return data, hash[:]
+	return msgs
 }
 
 func ToReadableString(m []IMessageElement) (r string) {
@@ -577,6 +627,8 @@ func ToReadableString(m []IMessageElement) (r string) {
 			r += "/" + e.Name
 		case *GroupImageElement:
 			r += "[图片]"
+		case *ForwardElement:
+			r += "[聊天记录]"
 		// NOTE: flash pic is singular
 		// To be clarified
 		// case *GroupFlashImgElement:

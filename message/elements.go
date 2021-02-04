@@ -88,11 +88,13 @@ type ReplyElement struct {
 }
 
 type ShortVideoElement struct {
-	Name string
-	Uuid []byte
-	Size int32
-	Md5  []byte
-	Url  string
+	Name      string
+	Uuid      []byte
+	Size      int32
+	ThumbSize int32
+	Md5       []byte
+	ThumbMd5  []byte
+	Url       string
 }
 
 type ServiceElement struct {
@@ -103,7 +105,10 @@ type ServiceElement struct {
 }
 
 type ForwardElement struct {
-	ResId string
+	FileName string
+	Content  string
+	ResId    string
+	Items    []*msg.PbMultiMsgItem
 }
 
 type LightAppElement struct {
@@ -113,6 +118,19 @@ type LightAppElement struct {
 type RedBagElement struct {
 	MsgType RedBagMessageType
 	Title   string
+}
+
+// MusicShareElement 音乐分享卡片
+//
+// 请使用 SendGroupMusicShare 或者 SendFriendMusicShare 发送
+type MusicShareElement struct {
+	MusicType  int    // 音乐类型,请使用 QQMusic 等常量
+	Title      string // 标题(歌曲名)
+	Brief      string
+	Summary    string // 简介(歌手名)
+	Url        string // 点击跳转链接
+	PictureUrl string // 显示图片链接
+	MusicUrl   string // 音乐播放链接
 }
 
 // TODO: 总之就是非常傻逼
@@ -318,6 +336,11 @@ func (e *LightAppElement) Type() ElementType {
 	return LightApp
 }
 
+// Type implement message.IMessageElement
+func (e *MusicShareElement) Type() ElementType {
+	return LightApp
+}
+
 func (e *RedBagElement) Type() ElementType {
 	return RedBag
 }
@@ -495,5 +518,19 @@ var newSysFaceMap = map[int]string{
 	271: "吃瓜",
 	272: "呵呵哒",
 	273: "我酸了",
+	274: "太南了",
+	276: "辣椒酱",
 	277: "汪汪",
+	278: "汗",
+	279: "打脸",
+	280: "击掌",
+	281: "无眼笑",
+	282: "敬礼",
+	283: "狂笑",
+	284: "面无表情",
+	285: "摸鱼",
+	286: "魔鬼笑",
+	287: "哦",
+	288: "请",
+	289: "睁眼",
 }

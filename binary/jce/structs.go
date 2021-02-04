@@ -33,6 +33,46 @@ type (
 		Location string `jceId:"8"`
 	}
 
+	FileStoragePushFSSvcList struct {
+		UploadList            []FileStorageServerInfo `jceId:"0"`
+		PicDownloadList       []FileStorageServerInfo `jceId:"1"`
+		GPicDownloadList      []FileStorageServerInfo `jceId:"2"`
+		QZoneProxyServiceList []FileStorageServerInfo `jceId:"3"`
+		UrlEncodeServiceList  []FileStorageServerInfo `jceId:"4"`
+		BigDataChannel        *BigDataChannel         `jceId:"5"`
+		VipEmotionList        []FileStorageServerInfo `jceId:"6"`
+		C2CPicDownList        []FileStorageServerInfo `jceId:"7"`
+		//FmtIPInfo             *FmtIPInfo `jceId:"8"`
+		//DomainIPChannel       *DomainIPChannel `jceId:"9"`
+		PttList []byte `jceId:"10"`
+	}
+
+	FileStorageServerInfo struct {
+		Server string `jceId:"1"`
+		Port   int32  `jceId:"2"`
+	}
+
+	BigDataChannel struct {
+		IPLists     []BigDataIPList `jceId:"0"`
+		SigSession  []byte          `jceId:"1"`
+		KeySession  []byte          `jceId:"2"`
+		SigUin      int64           `jceId:"3"`
+		ConnectFlag int32           `jceId:"4"`
+		PbBuf       []byte          `jceId:"5"`
+	}
+
+	BigDataIPList struct {
+		ServiceType  int64           `jceId:"0"`
+		IPList       []BigDataIPInfo `jceId:"1"`
+		FragmentSize int64           `jceId:"3"`
+	}
+
+	BigDataIPInfo struct {
+		Type   int64  `jceId:"0"`
+		Server string `jceId:"1"`
+		Port   int64  `jceId:"2"`
+	}
+
 	SvcReqRegister struct {
 		IJceStruct
 		Uin                int64  `jceId:"0"`
@@ -94,6 +134,87 @@ type (
 		ExtOnlineStatus          int64  `jceId:"17"`
 		ClientBatteryGetInterval int64  `jceId:"18"`
 		ClientAutoStatusInterval int64  `jceId:"19"`
+	}
+
+	SvcReqRegisterNew struct {
+		IJceStruct
+		RequestOptional   int64      `jceId:"0"`
+		C2CMsg            IJceStruct `jceId:"1"` // SvcReqGetMsgV2
+		GroupMsg          IJceStruct `jceId:"2"` // SvcReqPullGroupMsgSeq
+		DisGroupMsgFilter byte       `jceId:"14"`
+		GroupMask         byte       `jceId:"15"`
+		EndSeq            int64      `jceId:"16"`
+		O769Body          []byte     `jceId:"20"`
+	}
+
+	SvcReqGetMsgV2 struct {
+		IJceStruct
+		Uin              int64  `jceId:"0"`
+		DateTime         int32  `jceId:"1"`
+		RecivePic        byte   `jceId:"4"`
+		Ability          int16  `jceId:"6"`
+		Channel          byte   `jceId:"9"`
+		Inst             byte   `jceId:"16"`
+		ChannelEx        byte   `jceId:"17"`
+		SyncCookie       []byte `jceId:"18"`
+		SyncFlag         int    `jceId:"19"`
+		RambleFlag       byte   `jceId:"20"`
+		GeneralAbi       int64  `jceId:"26"`
+		PubAccountCookie []byte `jceId:"27"`
+	}
+
+	SvcReqPullGroupMsgSeq struct {
+		IJceStruct
+		GroupInfo  []IJceStruct `jceId:"0"` // PullGroupSeqParam
+		VerifyType byte         `jceId:"1"`
+		Filter     int32        `jceId:"2"`
+	}
+
+	PullGroupSeqParam struct {
+		IJceStruct
+		GroupCode int64 `jceId:"0"`
+		LastSeqId int64 `jceId:"1"`
+	}
+
+	SvcRespParam struct {
+		PCStat              int32        `jceId:"0"`
+		IsSupportC2CRoamMsg int32        `jceId:"1"`
+		IsSupportDataLine   int32        `jceId:"2"`
+		IsSupportPrintable  int32        `jceId:"3"`
+		IsSupportViewPCFile int32        `jceId:"4"`
+		PcVersion           int32        `jceId:"5"`
+		RoamFlag            int64        `jceId:"6"`
+		OnlineInfos         []OnlineInfo `jceId:"7"`
+		PCClientType        int32        `jceId:"8"`
+	}
+
+	OnlineInfo struct {
+		InstanceId   int32  `jceId:"0"`
+		ClientType   int32  `jceId:"1"`
+		OnlineStatus int32  `jceId:"2"`
+		PlatformId   int32  `jceId:"3"`
+		SubPlatform  string `jceId:"4"`
+		UClientType  int64  `jceId:"5"`
+	}
+
+	SvcReqMSFLoginNotify struct {
+		AppId        int64          `jceId:"0"`
+		Status       byte           `jceId:"1"`
+		Tablet       byte           `jceId:"2"`
+		Platform     int64          `jceId:"3"`
+		Title        string         `jceId:"4"`
+		Info         string         `jceId:"5"`
+		ProductType  int64          `jceId:"6"`
+		ClientType   int64          `jceId:"7"`
+		InstanceList []InstanceInfo `jceId:"8"`
+	}
+
+	InstanceInfo struct {
+		AppId       int32 `jceId:"0"`
+		Tablet      byte  `jceId:"1"`
+		Platform    int64 `jceId:"2"`
+		ProductType int64 `jceId:"3"`
+		ClientType  int64 `jceId:"4"`
 	}
 
 	PushMessageInfo struct {
@@ -375,15 +496,16 @@ type (
 		GroupUin           int64 `jceId:"5"`
 		//Seed               []byte`jceId:"6"`
 		//SearchName         string`jceId:"7"`
-		GetControl       int64   `jceId:"8"`
-		AddFriendSource  int32   `jceId:"9"`
-		SecureSig        []byte  `jceId:"10"`
-		TinyId           int64   `jceId:"15"`
-		LikeSource       int64   `jceId:"16"`
-		ReqMedalWallInfo byte    `jceId:"18"`
-		Req0x5ebFieldId  []int64 `jceId:"19"`
-		ReqNearbyGodInfo byte    `jceId:"20"`
-		ReqExtendCard    byte    `jceId:"22"`
+		GetControl       int64    `jceId:"8"`
+		AddFriendSource  int32    `jceId:"9"`
+		SecureSig        []byte   `jceId:"10"`
+		ReqServices      [][]byte `jceId:"14"`
+		TinyId           int64    `jceId:"15"`
+		LikeSource       int64    `jceId:"16"`
+		ReqMedalWallInfo byte     `jceId:"18"`
+		Req0x5ebFieldId  []int64  `jceId:"19"`
+		ReqNearbyGodInfo byte     `jceId:"20"`
+		ReqExtendCard    byte     `jceId:"22"`
 	}
 
 	SummaryCardReqSearch struct {
@@ -450,6 +572,54 @@ func (pkt *SsoServerInfo) ReadFrom(r *JceReader) {
 	pkt.Server = r.ReadString(1)
 	pkt.Port = r.ReadInt32(2)
 	pkt.Location = r.ReadString(8)
+}
+
+func (pkt *FileStoragePushFSSvcList) ReadFrom(r *JceReader) {
+	pkt.UploadList = []FileStorageServerInfo{}
+	pkt.PicDownloadList = []FileStorageServerInfo{}
+	pkt.GPicDownloadList = []FileStorageServerInfo{}
+	pkt.QZoneProxyServiceList = []FileStorageServerInfo{}
+	pkt.UrlEncodeServiceList = []FileStorageServerInfo{}
+	pkt.BigDataChannel = &BigDataChannel{}
+	pkt.VipEmotionList = []FileStorageServerInfo{}
+	pkt.C2CPicDownList = []FileStorageServerInfo{}
+	r.ReadSlice(&pkt.UploadList, 0)
+	r.ReadSlice(&pkt.PicDownloadList, 1)
+	r.ReadSlice(&pkt.GPicDownloadList, 2)
+	r.ReadSlice(&pkt.QZoneProxyServiceList, 3)
+	r.ReadSlice(&pkt.UrlEncodeServiceList, 4)
+	r.ReadJceStruct(pkt.BigDataChannel, 5)
+	r.ReadSlice(&pkt.VipEmotionList, 6)
+	r.ReadSlice(&pkt.C2CPicDownList, 7)
+	pkt.PttList = r.ReadAny(10).([]byte)
+}
+
+func (pkt *FileStorageServerInfo) ReadFrom(r *JceReader) {
+	pkt.Server = r.ReadString(1)
+	pkt.Port = r.ReadInt32(2)
+}
+
+func (pkt *BigDataChannel) ReadFrom(r *JceReader) {
+	pkt.IPLists = []BigDataIPList{}
+	r.ReadSlice(&pkt.IPLists, 0)
+	pkt.SigSession = r.ReadAny(1).([]byte)
+	pkt.KeySession = r.ReadAny(2).([]byte)
+	pkt.SigUin = r.ReadInt64(3)
+	pkt.ConnectFlag = r.ReadInt32(4)
+	pkt.PbBuf = r.ReadAny(5).([]byte)
+}
+
+func (pkt *BigDataIPList) ReadFrom(r *JceReader) {
+	pkt.IPList = []BigDataIPInfo{}
+	pkt.ServiceType = r.ReadInt64(0)
+	r.ReadSlice(&pkt.IPList, 1)
+	pkt.FragmentSize = r.ReadInt64(3)
+}
+
+func (pkt *BigDataIPInfo) ReadFrom(r *JceReader) {
+	pkt.Type = r.ReadInt64(0)
+	pkt.Server = r.ReadString(1)
+	pkt.Port = r.ReadInt64(2)
 }
 
 func (pkt *SvcReqRegister) ToBytes() []byte {
@@ -576,6 +746,49 @@ func (pkt *SvcDevLoginInfo) ReadFrom(r *JceReader) {
 	pkt.CanBeKicked = r.ReadInt64(10)
 }
 
+func (pkt *SvcRespParam) ReadFrom(r *JceReader) {
+	pkt.OnlineInfos = []OnlineInfo{}
+	pkt.PCStat = r.ReadInt32(0)
+	pkt.IsSupportC2CRoamMsg = r.ReadInt32(1)
+	pkt.IsSupportDataLine = r.ReadInt32(2)
+	pkt.IsSupportPrintable = r.ReadInt32(3)
+	pkt.IsSupportViewPCFile = r.ReadInt32(4)
+	pkt.PcVersion = r.ReadInt32(5)
+	pkt.RoamFlag = r.ReadInt64(6)
+	r.ReadSlice(&pkt.OnlineInfos, 7)
+	pkt.PCClientType = r.ReadInt32(8)
+}
+
+func (pkt *OnlineInfo) ReadFrom(r *JceReader) {
+	pkt.InstanceId = r.ReadInt32(0)
+	pkt.ClientType = r.ReadInt32(1)
+	pkt.OnlineStatus = r.ReadInt32(2)
+	pkt.PlatformId = r.ReadInt32(3)
+	pkt.SubPlatform = string(r.ReadAny(4).([]byte))
+	pkt.UClientType = r.ReadInt64(5)
+}
+
+func (pkt *SvcReqMSFLoginNotify) ReadFrom(r *JceReader) {
+	pkt.InstanceList = []InstanceInfo{}
+	pkt.AppId = r.ReadInt64(0)
+	pkt.Status = r.ReadByte(1)
+	pkt.Tablet = r.ReadByte(2)
+	pkt.Platform = r.ReadInt64(3)
+	pkt.Title = r.ReadString(4)
+	pkt.Info = r.ReadString(5)
+	pkt.ProductType = r.ReadInt64(6)
+	pkt.ClientType = r.ReadInt64(7)
+	r.ReadSlice(&pkt.InstanceList, 8)
+}
+
+func (pkt *InstanceInfo) ReadFrom(r *JceReader) {
+	pkt.AppId = r.ReadInt32(0)
+	pkt.Tablet = r.ReadByte(1)
+	pkt.Platform = r.ReadInt64(2)
+	pkt.ProductType = r.ReadInt64(3)
+	pkt.ClientType = r.ReadInt64(4)
+}
+
 func (pkt *SvcRespPushMsg) ToBytes() []byte {
 	w := NewJceWriter()
 	w.WriteJceStructRaw(pkt)
@@ -589,6 +802,12 @@ func (pkt *ModifyGroupCardRequest) ToBytes() []byte {
 }
 
 func (pkt *SvcReqGetDevLoginInfo) ToBytes() []byte {
+	w := NewJceWriter()
+	w.WriteJceStructRaw(pkt)
+	return w.Bytes()
+}
+
+func (pkt *SvcReqRegisterNew) ToBytes() []byte {
 	w := NewJceWriter()
 	w.WriteJceStructRaw(pkt)
 	return w.Bytes()

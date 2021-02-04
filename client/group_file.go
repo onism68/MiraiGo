@@ -1,12 +1,18 @@
 package client
 
 import (
+	"crypto/sha1"
 	"encoding/hex"
-	"errors"
 	"fmt"
+	"github.com/Mrs4s/MiraiGo/utils"
+	"io"
+	"os"
+	"runtime/debug"
+
 	"github.com/Mrs4s/MiraiGo/client/pb/oidb"
 	"github.com/Mrs4s/MiraiGo/protocol/packets"
 	"github.com/golang/protobuf/proto"
+	"github.com/pkg/errors"
 )
 
 type (
@@ -45,10 +51,17 @@ type (
 	}
 )
 
+func init() {
+	decoders["OidbSvc.0x6d8_1"] = decodeOIDB6d81Response
+	decoders["OidbSvc.0x6d6_0"] = decodeOIDB6d60Response
+	decoders["OidbSvc.0x6d6_2"] = decodeOIDB6d62Response
+	decoders["OidbSvc.0x6d6_3"] = decodeOIDB6d63Response
+}
+
 func (c *QQClient) GetGroupFileSystem(groupCode int64) (fs *GroupFileSystem, err error) {
 	defer func() {
 		if pan := recover(); pan != nil {
-			c.Error("get group fs error: %v", pan)
+			c.Error("get group fs error: %v\n%s", pan, debug.Stack())
 			err = errors.New("fs error")
 		}
 	}()
@@ -138,6 +151,21 @@ func (fs *GroupFileSystem) GetFilesByFolder(folderId string) ([]*GroupFile, []*G
 	return files, folders, nil
 }
 
+func (fs *GroupFileSystem) uploadFile(p, name, folderId string) error {
+	file, err := os.OpenFile(p, os.O_RDONLY, 0666)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	md5Hash, size := utils.ComputeMd5AndLength(file)
+	_, _ = file.Seek(0, io.SeekStart)
+	sha1H := sha1.New()
+	_, _ = io.Copy(sha1H, file)
+	sha1Hash := sha1H.Sum(nil)
+	fs.client.sendAndWait(fs.client.buildGroupFileUploadReqPacket(folderId, name, fs.GroupCode, size, md5Hash, sha1Hash))
+	return nil
+}
+
 func (fs *GroupFileSystem) GetDownloadUrl(file *GroupFile) string {
 	return fs.client.GetGroupFileUrl(file.GroupCode, file.FileId, file.BusId)
 }
@@ -150,6 +178,31 @@ func (fs *GroupFileSystem) DeleteFile(parentFolderId, fileId string, busId int32
 		return err.Error()
 	}
 	return i.(string)
+}
+
+func (c *QQClient) buildGroupFileUploadReqPacket(parentFolderId, fileName string, groupCode, fileSize int64, md5, sha1 []byte) (uint16, []byte) {
+	seq := c.nextSeq()
+	b, _ := proto.Marshal(&oidb.D6D6ReqBody{UploadFileReq: &oidb.UploadFileReqBody{
+		GroupCode:      groupCode,
+		AppId:          3,
+		BusId:          102,
+		Entrance:       5,
+		ParentFolderId: parentFolderId,
+		FileName:       fileName,
+		LocalPath:      "/storage/emulated/0/Pictures/files/s/" + fileName,
+		Int64FileSize:  fileSize,
+		Sha:            sha1,
+		Md5:            md5,
+	}})
+	req := &oidb.OIDBSSOPkg{
+		Command:       1750,
+		ServiceType:   0,
+		Bodybuffer:    b,
+		ClientVersion: "android 8.4.8",
+	}
+	payload, _ := proto.Marshal(req)
+	packet := packets.BuildUniPacket(c.Uin, seq, "OidbSvc.0x6d6_0", 1, c.OutGoingPacketSessionId, EmptyBytes, c.sigInfo.d2Key, payload)
+	return seq, packet
 }
 
 // OidbSvc.0x6d8_1
@@ -264,10 +317,10 @@ func decodeOIDB6d81Response(c *QQClient, _ uint16, payload []byte) (interface{},
 	pkg := oidb.OIDBSSOPkg{}
 	rsp := oidb.D6D8RspBody{}
 	if err := proto.Unmarshal(payload, &pkg); err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "failed to unmarshal protobuf message")
 	}
 	if err := proto.Unmarshal(pkg.Bodybuffer, &rsp); err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "failed to unmarshal protobuf message")
 	}
 	return &rsp, nil
 }
@@ -277,10 +330,10 @@ func decodeOIDB6d62Response(_ *QQClient, _ uint16, payload []byte) (interface{},
 	pkg := oidb.OIDBSSOPkg{}
 	rsp := oidb.D6D6RspBody{}
 	if err := proto.Unmarshal(payload, &pkg); err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "failed to unmarshal protobuf message")
 	}
 	if err := proto.Unmarshal(pkg.Bodybuffer, &rsp); err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "failed to unmarshal protobuf message")
 	}
 	if rsp.DownloadFileRsp.DownloadUrl == nil {
 		return nil, errors.New(rsp.DownloadFileRsp.ClientWording)
@@ -294,13 +347,25 @@ func decodeOIDB6d63Response(_ *QQClient, _ uint16, payload []byte) (interface{},
 	pkg := oidb.OIDBSSOPkg{}
 	rsp := oidb.D6D6RspBody{}
 	if err := proto.Unmarshal(payload, &pkg); err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "failed to unmarshal protobuf message")
 	}
 	if err := proto.Unmarshal(pkg.Bodybuffer, &rsp); err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "failed to unmarshal protobuf message")
 	}
 	if rsp.DeleteFileRsp == nil {
 		return "", nil
 	}
 	return rsp.DeleteFileRsp.ClientWording, nil
+}
+
+func decodeOIDB6d60Response(_ *QQClient, _ uint16, payload []byte) (interface{}, error) {
+	pkg := oidb.OIDBSSOPkg{}
+	rsp := oidb.D6D6RspBody{}
+	if err := proto.Unmarshal(payload, &pkg); err != nil {
+		return nil, errors.Wrap(err, "failed to unmarshal protobuf message")
+	}
+	if err := proto.Unmarshal(pkg.Bodybuffer, &rsp); err != nil {
+		return nil, errors.Wrap(err, "failed to unmarshal protobuf message")
+	}
+	return nil, nil
 }
