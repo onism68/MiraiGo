@@ -8,11 +8,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/golang/protobuf/proto"
+	jsoniter "github.com/json-iterator/go"
+
 	"github.com/Mrs4s/MiraiGo/binary"
 	"github.com/Mrs4s/MiraiGo/client/pb/msg"
 	"github.com/Mrs4s/MiraiGo/utils"
-	"github.com/golang/protobuf/proto"
-	jsoniter "github.com/json-iterator/go"
 )
 
 var json = jsoniter.ConfigFastest
@@ -21,6 +22,7 @@ type (
 	PrivateMessage struct {
 		Id         int32
 		InternalId int32
+		Self       int64
 		Target     int64
 		Time       int32
 		Sender     *Sender
@@ -31,6 +33,7 @@ type (
 		Id        int32
 		GroupCode int64
 		GroupName string
+		Self      int64
 		Sender    *Sender
 		Elements  []IMessageElement
 	}
@@ -44,7 +47,7 @@ type (
 		Time           int32
 		Elements       []IMessageElement
 		OriginalObject *msg.Message
-		//OriginalElements []*msg.Elem
+		// OriginalElements []*msg.Elem
 	}
 
 	SendingMessage struct {
@@ -248,7 +251,7 @@ func (msg *SendingMessage) ToFragmented() [][]IMessageElement {
 func EstimateLength(elems []IMessageElement, limit int) int {
 	sum := 0
 	for _, elem := range elems {
-		if sum >= limit {
+		if sum > limit {
 			break
 		}
 		left := int(math.Max(float64(limit-sum), 0))
@@ -325,7 +328,7 @@ func ToProtoElems(elems []IMessageElement, generalFlags bool) (r []*msg.Elem) {
 					})
 					break L
 				}
-				//d, _ := hex.DecodeString("08097800C80100F00100F80100900200C80200980300A00320B00300C00300D00300E803008A04020803900480808010B80400C00400")
+				// d, _ := hex.DecodeString("08097800C80100F00100F80100900200C80200980300A00320B00300C00300D00300E803008A04020803900480808010B80400C00400")
 				r = append(r, &msg.Elem{
 					GeneralFlags: &msg.GeneralFlags{
 						PbReserve: []byte{
@@ -362,16 +365,14 @@ func ToSrcProtoElems(elems []IMessageElement) (r []*msg.Elem) {
 func ParseMessageElems(elems []*msg.Elem) []IMessageElement {
 	var res []IMessageElement
 	for _, elem := range elems {
-		if elem.SrcMsg != nil {
-			if len(elem.SrcMsg.OrigSeqs) != 0 {
-				r := &ReplyElement{
-					ReplySeq: elem.SrcMsg.OrigSeqs[0],
-					Time:     elem.SrcMsg.GetTime(),
-					Sender:   elem.SrcMsg.GetSenderUin(),
-					Elements: ParseMessageElems(elem.SrcMsg.Elems),
-				}
-				res = append(res, r)
+		if elem.SrcMsg != nil && len(elem.SrcMsg.OrigSeqs) != 0 {
+			r := &ReplyElement{
+				ReplySeq: elem.SrcMsg.OrigSeqs[0],
+				Time:     elem.SrcMsg.GetTime(),
+				Sender:   elem.SrcMsg.GetSenderUin(),
+				Elements: ParseMessageElems(elem.SrcMsg.Elems),
 			}
+			res = append(res, r)
 		}
 		if elem.TransElemInfo != nil {
 			if elem.TransElemInfo.GetElemType() == 24 { // QFile
@@ -478,9 +479,9 @@ func ParseMessageElems(elems []*msg.Elem) []IMessageElement {
 				Height:   elem.CustomFace.GetHeight(),
 				Url: func() string {
 					if elem.CustomFace.GetOrigUrl() == "" {
-						return "http://gchat.qpic.cn/gchatpic_new/0/0-0-" + strings.ReplaceAll(binary.CalculateImageResourceId(elem.CustomFace.Md5)[1:37], "-", "") + "/0?term=2"
+						return "https://gchat.qpic.cn/gchatpic_new/0/0-0-" + strings.ReplaceAll(binary.CalculateImageResourceId(elem.CustomFace.Md5)[1:37], "-", "") + "/0?term=2"
 					}
-					return "http://gchat.qpic.cn" + elem.CustomFace.GetOrigUrl()
+					return "https://gchat.qpic.cn" + elem.CustomFace.GetOrigUrl()
 				}(),
 				Md5: elem.CustomFace.Md5,
 			})
@@ -488,9 +489,9 @@ func ParseMessageElems(elems []*msg.Elem) []IMessageElement {
 		if elem.NotOnlineImage != nil {
 			var img string
 			if elem.NotOnlineImage.GetOrigUrl() != "" {
-				img = "http://c2cpicdw.qpic.cn" + elem.NotOnlineImage.GetOrigUrl()
+				img = "https://c2cpicdw.qpic.cn" + elem.NotOnlineImage.GetOrigUrl()
 			} else {
-				img = "http://c2cpicdw.qpic.cn/offpic_new/0/" + elem.NotOnlineImage.GetResId() + "/0?term=2"
+				img = "https://c2cpicdw.qpic.cn/offpic_new/0/" + elem.NotOnlineImage.GetResId() + "/0?term=2"
 			}
 			res = append(res, &ImageElement{
 				Filename: elem.NotOnlineImage.GetFilePath(),
@@ -500,8 +501,9 @@ func ParseMessageElems(elems []*msg.Elem) []IMessageElement {
 			})
 		}
 		if elem.QQWalletMsg != nil && elem.QQWalletMsg.AioBody != nil {
+			// /com/tencent/mobileqq/data/MessageForQQWalletMsg.java#L366
 			msgType := elem.QQWalletMsg.AioBody.GetMsgType()
-			if msgType == 2 || msgType == 3 || msgType == 6 {
+			if msgType <= 1000 && elem.QQWalletMsg.AioBody.RedType != nil {
 				return []IMessageElement{
 					&RedBagElement{
 						MsgType: RedBagMessageType(msgType),
@@ -587,7 +589,7 @@ func (forMsg *ForwardMessage) CalculateValidationDataForward(seq, random int32, 
 }
 
 func (forMsg *ForwardMessage) packForwardMsg(seq int32, random int32, groupCode int64) []*msg.Message {
-	var msgs []*msg.Message
+	msgs := make([]*msg.Message, 0, len(forMsg.Nodes))
 	for _, node := range forMsg.Nodes {
 		msgs = append(msgs, &msg.Message{
 			Head: &msg.MessageHead{
@@ -640,4 +642,8 @@ func ToReadableString(m []IMessageElement) (r string) {
 		}
 	}
 	return
+}
+
+func FaceNameById(id int) string {
+	return faceMap[id]
 }

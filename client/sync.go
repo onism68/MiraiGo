@@ -1,9 +1,11 @@
 package client
 
 import (
-	"fmt"
+	"math/rand"
+	"sync"
+	"time"
+
 	"github.com/Mrs4s/MiraiGo/binary/jce"
-	"github.com/Mrs4s/MiraiGo/client/pb"
 	"github.com/Mrs4s/MiraiGo/client/pb/msf"
 	"github.com/Mrs4s/MiraiGo/client/pb/msg"
 	"github.com/Mrs4s/MiraiGo/client/pb/oidb"
@@ -11,10 +13,6 @@ import (
 	"github.com/Mrs4s/MiraiGo/protocol/packets"
 	"github.com/golang/protobuf/proto"
 	"github.com/pkg/errors"
-	"math/rand"
-	"sync"
-	"sync/atomic"
-	"time"
 )
 
 func init() {
@@ -28,10 +26,10 @@ func init() {
 	decoders["RegPrxySvc.PbSyncMsg"] = decodeMsgSyncResponse
 	decoders["PbMessageSvc.PbMsgReadedReport"] = decodeMsgReadedResponse
 	decoders["MessageSvc.PushReaded"] = ignoreDecoder
+	decoders["OnlinePush.PbC2CMsgSync"] = decodeC2CSyncPacket
 }
 
 type (
-
 	// SessionSyncResponse 会话同步结果
 	SessionSyncResponse struct {
 		GroupSessions []*GroupSessionInfo
@@ -58,7 +56,7 @@ func (c *QQClient) GetAllowedClients() ([]*OtherClientInfo, error) {
 		return nil, err
 	}
 	list := i.([]jce.SvcDevLoginInfo)
-	var ret []*OtherClientInfo
+	ret := make([]*OtherClientInfo, 0, len(list))
 	for _, l := range list {
 		ret = append(ret, &OtherClientInfo{
 			AppId:      l.AppId,
@@ -75,20 +73,15 @@ func (c *QQClient) RefreshStatus() error {
 	return err
 }
 
+// SyncSessions 同步会话列表
 func (c *QQClient) SyncSessions() (*SessionSyncResponse, error) {
-	_, pkt := c.buildSyncMsgRequestPacket()
-	if err := c.send(pkt); err != nil {
-		return nil, err
-	}
 	ret := &SessionSyncResponse{}
 	notifyChan := make(chan bool)
 	var groupNum int32 = -1
-	p := 0
 	stop := c.waitPacket("RegPrxySvc.PbSyncMsg", func(i interface{}, err error) {
 		if err != nil {
 			return
 		}
-		p++
 		e := i.(*sessionSyncEvent)
 		if len(e.GroupSessions) > 0 {
 			ret.GroupSessions = append(ret.GroupSessions, e.GroupSessions...)
@@ -96,14 +89,20 @@ func (c *QQClient) SyncSessions() (*SessionSyncResponse, error) {
 		if e.GroupNum != -1 {
 			groupNum = e.GroupNum
 		}
+		c.Debug("sync session %v/%v", len(ret.GroupSessions), groupNum)
 		if groupNum != -1 && len(ret.GroupSessions) >= int(groupNum) {
 			notifyChan <- true
 		}
 	})
+	_, pkt := c.buildSyncMsgRequestPacket()
+	if err := c.send(pkt); err != nil {
+		stop()
+		return nil, err
+	}
 	select {
 	case <-notifyChan:
 		stop()
-	case <-time.After(time.Second * 5):
+	case <-time.After(time.Second * 3):
 		stop()
 	}
 	return ret, nil
@@ -112,6 +111,10 @@ func (c *QQClient) SyncSessions() (*SessionSyncResponse, error) {
 // MarkGroupMessageReaded 标记群消息已读, 适当调用应该能减少风控
 func (c *QQClient) MarkGroupMessageReaded(groupCode, seq int64) {
 	_, _ = c.sendAndWait(c.buildGroupMsgReadedPacket(groupCode, seq))
+}
+
+func (c *QQClient) MarkPrivateMessageReaded(uin, time int64) {
+	_, _ = c.sendAndWait(c.buildPrivateMsgReadedPacket(uin, time))
 }
 
 // StatSvc.GetDevLoginInfo
@@ -205,9 +208,10 @@ func (c *QQClient) buildSyncMsgRequestPacket() (uint16, []byte) {
 				Type:    proto.Uint32(283),
 				Version: proto.Uint32(0),
 			},
-		}})
+		},
+	})
 	regReq := &jce.SvcReqRegisterNew{
-		RequestOptional:   128 | 0 | 64 | 256 | 2 | 8192 | 16384 | 65536,
+		RequestOptional:   128 | 64 | 256 | 2 | 8192 | 16384 | 65536,
 		DisGroupMsgFilter: 1,
 		C2CMsg: &jce.SvcReqGetMsgV2{
 			Uin: c.Uin,
@@ -275,8 +279,20 @@ func (c *QQClient) buildGroupMsgReadedPacket(groupCode, msgSeq int64) (uint16, [
 	return seq, packet
 }
 
+func (c *QQClient) buildPrivateMsgReadedPacket(uin, time int64) (uint16, []byte) {
+	seq := c.nextSeq()
+	req, _ := proto.Marshal(&msg.PbMsgReadedReportReq{C2CReadReport: &msg.PbC2CReadedReportReq{PairInfo: []*msg.UinPairReadInfo{
+		{
+			PeerUin:      proto.Uint64(uint64(uin)),
+			LastReadTime: proto.Uint32(uint32(time)),
+		},
+	}, SyncCookie: c.syncCookie}})
+	packet := packets.BuildUniPacket(c.Uin, seq, "PbMessageSvc.PbMsgReadedReport", 1, c.OutGoingPacketSessionId, []byte{}, c.sigInfo.d2Key, req)
+	return seq, packet
+}
+
 // StatSvc.GetDevLoginInfo
-func decodeDevListResponse(_ *QQClient, _ uint16, payload []byte) (interface{}, error) {
+func decodeDevListResponse(_ *QQClient, _ *incomingPacketInfo, payload []byte) (interface{}, error) {
 	request := &jce.RequestPacket{}
 	request.ReadFrom(jce.NewJceReader(payload))
 	data := &jce.RequestDataVersion2{}
@@ -299,7 +315,7 @@ func decodeDevListResponse(_ *QQClient, _ uint16, payload []byte) (interface{}, 
 }
 
 // RegPrxySvc.PushParam
-func decodePushParamPacket(c *QQClient, _ uint16, payload []byte) (interface{}, error) {
+func decodePushParamPacket(c *QQClient, _ *incomingPacketInfo, payload []byte) (interface{}, error) {
 	request := &jce.RequestPacket{}
 	request.ReadFrom(jce.NewJceReader(payload))
 	data := &jce.RequestDataVersion2{}
@@ -344,7 +360,7 @@ func decodePushParamPacket(c *QQClient, _ uint16, payload []byte) (interface{}, 
 }
 
 // RegPrxySvc.PbSyncMsg
-func decodeMsgSyncResponse(c *QQClient, _ uint16, payload []byte) (interface{}, error) {
+func decodeMsgSyncResponse(c *QQClient, info *incomingPacketInfo, payload []byte) (interface{}, error) {
 	rsp := &msf.SvcRegisterProxyMsgResp{}
 	if err := proto.Unmarshal(payload, rsp); err != nil {
 		return nil, err
@@ -365,7 +381,10 @@ func decodeMsgSyncResponse(c *QQClient, _ uint16, payload []byte) (interface{}, 
 			var latest []*message.GroupMessage
 			for _, m := range gmRsp.Msg {
 				if m.Head.GetFromUin() != 0 {
-					latest = append(latest, c.parseGroupMessage(m))
+					pm := c.parseGroupMessage(m)
+					if pm != nil {
+						latest = append(latest, pm)
+					}
 				}
 			}
 			ret.GroupSessions = append(ret.GroupSessions, &GroupSessionInfo{
@@ -378,13 +397,24 @@ func decodeMsgSyncResponse(c *QQClient, _ uint16, payload []byte) (interface{}, 
 	if len(rsp.C2CMsg) > 4 {
 		c2cRsp := &msg.GetMessageResponse{}
 		if proto.Unmarshal(rsp.C2CMsg[4:], c2cRsp) == nil {
-			c.c2cMessageSyncProcessor(c2cRsp) // todo rewrite c2c processor
+			c.c2cMessageSyncProcessor(c2cRsp, info)
 		}
 	}
 	return ret, nil
 }
 
-func decodeMsgReadedResponse(c *QQClient, _ uint16, payload []byte) (interface{}, error) {
+// OnlinePush.PbC2CMsgSync
+func decodeC2CSyncPacket(c *QQClient, info *incomingPacketInfo, payload []byte) (interface{}, error) {
+	m := msg.PbPushMsg{}
+	if err := proto.Unmarshal(payload, &m); err != nil {
+		return nil, err
+	}
+	_ = c.send(c.buildDeleteOnlinePushPacket(c.Uin, m.GetSvrip(), m.GetPushToken(), info.SequenceId, nil))
+	c.commMsgProcessor(m.Msg, info)
+	return nil, nil
+}
+
+func decodeMsgReadedResponse(_ *QQClient, _ *incomingPacketInfo, payload []byte) (interface{}, error) {
 	rsp := msg.PbMsgReadedReportResp{}
 	if err := proto.Unmarshal(payload, &rsp); err != nil {
 		return nil, errors.Wrap(err, "failed to unmarshal protobuf message")
@@ -398,7 +428,7 @@ func decodeMsgReadedResponse(c *QQClient, _ uint16, payload []byte) (interface{}
 var loginNotifyLock sync.Mutex
 
 // StatSvc.SvcReqMSFLoginNotify
-func decodeLoginNotifyPacket(c *QQClient, _ uint16, payload []byte) (interface{}, error) {
+func decodeLoginNotifyPacket(c *QQClient, _ *incomingPacketInfo, payload []byte) (interface{}, error) {
 	request := &jce.RequestPacket{}
 	request.ReadFrom(jce.NewJceReader(payload))
 	data := &jce.RequestDataVersion2{}
@@ -447,124 +477,4 @@ func decodeLoginNotifyPacket(c *QQClient, _ uint16, payload []byte) (interface{}
 		}
 	}
 	return nil, nil
-}
-
-func (c *QQClient) c2cMessageSyncProcessor(rsp *msg.GetMessageResponse) {
-	c.syncCookie = rsp.SyncCookie
-	c.pubAccountCookie = rsp.PubAccountCookie
-	c.msgCtrlBuf = rsp.MsgCtrlBuf
-	if rsp.UinPairMsgs == nil {
-		return
-	}
-	var delItems []*pb.MessageItem
-	for _, pairMsg := range rsp.UinPairMsgs {
-		for _, pMsg := range pairMsg.Messages {
-			// delete message
-			delItem := &pb.MessageItem{
-				FromUin: pMsg.Head.GetFromUin(),
-				ToUin:   pMsg.Head.GetToUin(),
-				MsgType: 187,
-				MsgSeq:  pMsg.Head.GetMsgSeq(),
-				MsgUid:  pMsg.Head.GetMsgUid(),
-			}
-			delItems = append(delItems, delItem)
-			if pMsg.Head.GetToUin() != c.Uin {
-				continue
-			}
-			if (int64(pairMsg.GetLastReadTime()) & 4294967295) > int64(pMsg.Head.GetMsgTime()) {
-				continue
-			}
-			strKey := fmt.Sprintf("%d%d%d%d", pMsg.Head.FromUin, pMsg.Head.ToUin, pMsg.Head.MsgSeq, pMsg.Head.MsgUid)
-			if _, ok := c.msgSvcCache.Get(strKey); ok {
-				continue
-			}
-			c.msgSvcCache.Add(strKey, "", time.Minute)
-			switch pMsg.Head.GetMsgType() {
-			case 33: // 加群同步
-				func() {
-					groupJoinLock.Lock()
-					defer groupJoinLock.Unlock()
-					group := c.FindGroupByUin(pMsg.Head.GetFromUin())
-					if pMsg.Head.GetAuthUin() == c.Uin {
-						if group == nil && c.ReloadGroupList() == nil {
-							c.dispatchJoinGroupEvent(c.FindGroupByUin(pMsg.Head.GetFromUin()))
-						}
-					} else {
-						if group != nil && group.FindMember(pMsg.Head.GetAuthUin()) == nil {
-							mem, err := c.getMemberInfo(group.Code, pMsg.Head.GetAuthUin())
-							if err != nil {
-								c.Debug("error to fetch new member info: %v", err)
-								return
-							}
-							group.Update(func(info *GroupInfo) {
-								info.Members = append(info.Members, mem)
-							})
-							c.dispatchNewMemberEvent(&MemberJoinGroupEvent{
-								Group:  group,
-								Member: mem,
-							})
-						}
-					}
-				}()
-			case 84, 87:
-				c.exceptAndDispatchGroupSysMsg()
-			case 141: // 临时会话
-				if pMsg.Head.C2CTmpMsgHead == nil {
-					continue
-				}
-				group := c.FindGroupByUin(pMsg.Head.C2CTmpMsgHead.GetGroupUin())
-				if group == nil {
-					continue
-				}
-				if pMsg.Head.GetFromUin() == c.Uin {
-					continue
-				}
-				c.dispatchTempMessage(c.parseTempMessage(pMsg))
-			case 166, 208: // 好友消息
-				if pMsg.Head.GetFromUin() == c.Uin {
-					for {
-						frdSeq := atomic.LoadInt32(&c.friendSeq)
-						if frdSeq < pMsg.Head.GetMsgSeq() {
-							if atomic.CompareAndSwapInt32(&c.friendSeq, frdSeq, pMsg.Head.GetMsgSeq()) {
-								break
-							}
-						} else {
-							break
-						}
-					}
-				}
-				if pMsg.Body.RichText == nil || pMsg.Body.RichText.Elems == nil {
-					continue
-				}
-				c.dispatchFriendMessage(c.parsePrivateMessage(pMsg))
-			case 187:
-				_, pkt := c.buildSystemMsgNewFriendPacket()
-				_ = c.send(pkt)
-			case 529:
-				sub4 := msg.SubMsgType0X4Body{}
-				if err := proto.Unmarshal(pMsg.Body.MsgContent, &sub4); err != nil {
-					err = errors.Wrap(err, "unmarshal sub msg 0x4 error")
-					c.Error("unmarshal sub msg 0x4 error: %v", err)
-					continue
-				}
-				if sub4.NotOnlineFile != nil {
-					rsp, err := c.sendAndWait(c.buildOfflineFileDownloadRequestPacket(sub4.NotOnlineFile.FileUuid)) // offline_file.go
-					if err != nil {
-						continue
-					}
-					c.dispatchOfflineFileEvent(&OfflineFileEvent{
-						FileName:    string(sub4.NotOnlineFile.FileName),
-						FileSize:    sub4.NotOnlineFile.GetFileSize(),
-						Sender:      pMsg.Head.GetFromUin(),
-						DownloadUrl: rsp.(string),
-					})
-				}
-			}
-		}
-	}
-	_, _ = c.sendAndWait(c.buildDeleteMessageRequestPacket(delItems))
-	if rsp.GetSyncFlag() != msg.SyncFlag_STOP {
-		c.Debug("continue sync with flag: %v", rsp.SyncFlag.String())
-		_, _ = c.sendAndWait(c.buildGetMessageRequestPacket(rsp.GetSyncFlag(), time.Now().Unix()))
-	}
 }

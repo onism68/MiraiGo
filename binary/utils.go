@@ -6,11 +6,28 @@ import (
 	"compress/zlib"
 	binary2 "encoding/binary"
 	"encoding/hex"
-	"fmt"
 	"io"
 	"net"
-	"strings"
+
+	"github.com/Mrs4s/MiraiGo/utils"
 )
+
+type GzipWriter struct {
+	w   *gzip.Writer
+	buf *bytes.Buffer
+}
+
+func (w *GzipWriter) Write(p []byte) (int, error) {
+	return w.w.Write(p)
+}
+
+func (w *GzipWriter) Close() error {
+	return w.w.Close()
+}
+
+func (w *GzipWriter) Bytes() []byte {
+	return w.buf.Bytes()
+}
 
 func ZlibUncompress(src []byte) []byte {
 	b := bytes.NewReader(src)
@@ -22,19 +39,21 @@ func ZlibUncompress(src []byte) []byte {
 }
 
 func ZlibCompress(data []byte) []byte {
-	buf := new(bytes.Buffer)
-	w := zlib.NewWriter(buf)
-	_, _ = w.Write(data)
-	w.Close()
-	return buf.Bytes()
+	zw := acquireZlibWriter()
+	_, _ = zw.w.Write(data)
+	_ = zw.w.Close()
+	ret := append([]byte(nil), zw.buf.Bytes()...)
+	releaseZlibWriter(zw)
+	return ret
 }
 
 func GZipCompress(data []byte) []byte {
-	buf := new(bytes.Buffer)
-	w := gzip.NewWriter(buf)
-	_, _ = w.Write(data)
-	_ = w.Close()
-	return buf.Bytes()
+	gw := AcquireGzipWriter()
+	_, _ = gw.Write(data)
+	_ = gw.Close()
+	ret := append([]byte(nil), gw.buf.Bytes()...)
+	ReleaseGzipWriter(gw)
+	return ret
 }
 
 func GZipUncompress(src []byte) []byte {
@@ -47,24 +66,35 @@ func GZipUncompress(src []byte) []byte {
 }
 
 func CalculateImageResourceId(md5 []byte) string {
-	return strings.ToUpper(fmt.Sprintf(
-		"{%s}.png", GenUUID(md5),
-	))
+	id := make([]byte, 36+6)[:0]
+	id = append(id, '{')
+	AppendUUID(id[1:], md5)
+	id = id[:37]
+	id = append(id, "}.png"...)
+	return utils.B2S(bytes.ToUpper(id))
 }
 
-func GenUUID(uuid []byte) string {
-	u := uuid[0:16]
-	buf := make([]byte, 36)
-	hex.Encode(buf[0:], u[0:4])
-	buf[8] = '-'
-	hex.Encode(buf[9:], u[4:6])
-	buf[13] = '-'
-	hex.Encode(buf[14:], u[6:8])
-	buf[18] = '-'
-	hex.Encode(buf[19:], u[8:10])
-	buf[23] = '-'
-	hex.Encode(buf[24:], u[10:16])
-	return string(buf)
+func GenUUID(uuid []byte) []byte {
+	return AppendUUID(nil, uuid)
+}
+
+func AppendUUID(dst []byte, uuid []byte) []byte {
+	_ = uuid[15]
+	if cap(dst) > 36 {
+		dst = dst[:36]
+		dst[8] = '-'
+		dst[13] = '-'
+		dst[18] = '-'
+		dst[23] = '-'
+	} else { // Need Grow
+		dst = append(dst, "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"...)
+	}
+	hex.Encode(dst[0:], uuid[0:4])
+	hex.Encode(dst[9:], uuid[4:6])
+	hex.Encode(dst[14:], uuid[6:8])
+	hex.Encode(dst[19:], uuid[8:10])
+	hex.Encode(dst[24:], uuid[10:16])
+	return dst
 }
 
 func ToIPV4Address(arr []byte) string {

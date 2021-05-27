@@ -3,11 +3,12 @@ package jce
 import (
 	"bytes"
 	goBinary "encoding/binary"
-	"github.com/modern-go/reflect2"
 	"reflect"
 	"strconv"
 	"sync"
 	"unsafe"
+
+	"github.com/modern-go/reflect2"
 )
 
 type JceWriter struct {
@@ -242,7 +243,7 @@ func (w *JceWriter) WriteJceStructRaw(s IJceStruct) {
 		decoderCache.Store(ty2, jceDec) // 存入缓存
 	}
 	for _, dec := range jceDec {
-		var obj = dec.ty.UnsafeIndirect(unsafe.Pointer(uintptr(reflect2.PtrOf(s)) + dec.offset)) // MAGIC!
+		obj := dec.ty.UnsafeIndirect(unsafe.Pointer(uintptr(reflect2.PtrOf(s)) + dec.offset)) // MAGIC!
 		if obj != nil {
 			w.WriteObject(obj, dec.id)
 		}

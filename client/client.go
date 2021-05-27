@@ -4,9 +4,6 @@ import (
 	"bytes"
 	"crypto/md5"
 	"fmt"
-	"github.com/Mrs4s/MiraiGo/binary/jce"
-	jsoniter "github.com/json-iterator/go"
-	"io"
 	"math"
 	"math/rand"
 	"net"
@@ -18,18 +15,21 @@ import (
 	"sync/atomic"
 	"time"
 
+	jsoniter "github.com/json-iterator/go"
 	"github.com/pkg/errors"
 
 	"github.com/Mrs4s/MiraiGo/binary"
+	"github.com/Mrs4s/MiraiGo/binary/jce"
 	"github.com/Mrs4s/MiraiGo/client/pb/msg"
 	"github.com/Mrs4s/MiraiGo/message"
+	"github.com/Mrs4s/MiraiGo/protocol/crypto"
 	"github.com/Mrs4s/MiraiGo/protocol/packets"
 	"github.com/Mrs4s/MiraiGo/utils"
 )
 
 var json = jsoniter.ConfigFastest
 
-//go:generate go run github.com/a8m/syncmap -o "handler_map_gen.go" -pkg client -name HandlerMap "map[uint16]func(i interface{}, err error)"
+//go:generate go run github.com/a8m/syncmap -o "handler_map_gen.go" -pkg client -name HandlerMap "map[uint16]*handlerInfo"
 
 type QQClient struct {
 	Uin         int64
@@ -43,12 +43,13 @@ type QQClient struct {
 	GroupList     []*GroupInfo
 	OnlineClients []*OtherClientInfo
 	Online        bool
-	NetLooping    bool
+	QiDian        *QiDianAccountInfo
+	// NetLooping    bool
 
 	SequenceId              int32
 	OutGoingPacketSessionId []byte
 	RandomKey               []byte
-	Conn                    net.Conn
+	TCP                     *utils.TCPListener
 	ConnectTime             time.Time
 
 	handlers        HandlerMap
@@ -75,21 +76,22 @@ type QQClient struct {
 	randSeed         []byte // t403
 	timeDiff         int64
 	sigInfo          *loginSigInfo
-	highwaySession   *highwaySessionInfo
+	bigDataSession   *bigDataSessionInfo
 	srvSsoAddrs      []string
 	otherSrvAddrs    []string
 	fileStorageInfo  *jce.FileStoragePushFSSvcList
 	pwdFlag          bool
 
 	lastMessageSeq int32
-	//lastMessageSeqTmp      sync.Map
+	// lastMessageSeqTmp      sync.Map
 	msgSvcCache            *utils.Cache
+	lastC2CMsgTime         int64
 	transCache             *utils.Cache
 	lastLostMsg            string
 	groupSysMsgCache       *GroupSystemMessages
 	groupMsgBuilders       sync.Map
 	onlinePushCache        *utils.Cache
-	requestPacketRequestId int32
+	requestPacketRequestID int32
 	groupSeq               int32
 	friendSeq              int32
 	heartbeatEnabled       bool
@@ -122,32 +124,46 @@ type loginSigInfo struct {
 	pt4TokenMap map[string][]byte
 }
 
-var decoders = map[string]func(*QQClient, uint16, []byte) (interface{}, error){
-	"wtlogin.login":                                      decodeLoginResponse,
-	"wtlogin.exchange_emp":                               decodeExchangeEmpResponse,
-	"StatSvc.register":                                   decodeClientRegisterResponse,
-	"StatSvc.ReqMSFOffline":                              decodeMSFOfflinePacket,
-	"MessageSvc.PushNotify":                              decodeSvcNotify,
-	"OnlinePush.ReqPush":                                 decodeOnlinePushReqPacket,
-	"OnlinePush.PbPushTransMsg":                          decodeOnlinePushTransPacket,
-	"ConfigPushSvc.PushReq":                              decodePushReqPacket,
-	"MessageSvc.PbGetMsg":                                decodeMessageSvcPacket,
-	"MessageSvc.PushForceOffline":                        decodeForceOfflinePacket,
-	"PbMessageSvc.PbMsgWithDraw":                         decodeMsgWithDrawResponse,
-	"friendlist.getFriendGroupList":                      decodeFriendGroupListResponse,
-	"friendlist.GetTroopListReqV2":                       decodeGroupListResponse,
-	"friendlist.GetTroopMemberListReq":                   decodeGroupMemberListResponse,
-	"group_member_card.get_group_member_card_info":       decodeGroupMemberInfoResponse,
-	"PttStore.GroupPttUp":                                decodeGroupPttStoreResponse,
-	"LongConn.OffPicUp":                                  decodeOffPicUpResponse,
-	"ProfileService.Pb.ReqSystemMsgNew.Group":            decodeSystemMsgGroupPacket,
-	"ProfileService.Pb.ReqSystemMsgNew.Friend":           decodeSystemMsgFriendPacket,
-	"OidbSvc.0xe07_0":                                    decodeImageOcrResponse,
-	"OidbSvc.0xd79":                                      decodeWordSegmentation,
-	"OidbSvc.0x990":                                      decodeTranslateResponse,
-	"SummaryCard.ReqSummaryCard":                         decodeSummaryCardResponse,
-	"LightAppSvc.mini_app_info.GetAppInfoById":           decodeAppInfoResponse,
-	"PttCenterSvr.pb_pttCenter_CMD_REQ_APPLY_UPLOAD-500": decodePrivatePttStoreResponse,
+type QiDianAccountInfo struct {
+	MasterUin  int64
+	ExtName    string
+	CreateTime int64
+
+	bigDataReqAddrs   []string
+	bigDataReqSession *bigDataSessionInfo
+}
+
+type handlerInfo struct {
+	fun    func(i interface{}, err error)
+	params requestParams
+}
+
+var decoders = map[string]func(*QQClient, *incomingPacketInfo, []byte) (interface{}, error){
+	"wtlogin.login":                                decodeLoginResponse,
+	"wtlogin.exchange_emp":                         decodeExchangeEmpResponse,
+	"wtlogin.trans_emp":                            decodeTransEmpResponse,
+	"StatSvc.register":                             decodeClientRegisterResponse,
+	"StatSvc.ReqMSFOffline":                        decodeMSFOfflinePacket,
+	"MessageSvc.PushNotify":                        decodeSvcNotify,
+	"OnlinePush.ReqPush":                           decodeOnlinePushReqPacket,
+	"OnlinePush.PbPushTransMsg":                    decodeOnlinePushTransPacket,
+	"ConfigPushSvc.PushReq":                        decodePushReqPacket,
+	"MessageSvc.PbGetMsg":                          decodeMessageSvcPacket,
+	"MessageSvc.PushForceOffline":                  decodeForceOfflinePacket,
+	"PbMessageSvc.PbMsgWithDraw":                   decodeMsgWithDrawResponse,
+	"friendlist.getFriendGroupList":                decodeFriendGroupListResponse,
+	"friendlist.delFriend":                         decodeFriendDeleteResponse,
+	"friendlist.GetTroopListReqV2":                 decodeGroupListResponse,
+	"friendlist.GetTroopMemberListReq":             decodeGroupMemberListResponse,
+	"group_member_card.get_group_member_card_info": decodeGroupMemberInfoResponse,
+	"PttStore.GroupPttUp":                          decodeGroupPttStoreResponse,
+	"LongConn.OffPicUp":                            decodeOffPicUpResponse,
+	"ProfileService.Pb.ReqSystemMsgNew.Group":      decodeSystemMsgGroupPacket,
+	"ProfileService.Pb.ReqSystemMsgNew.Friend":     decodeSystemMsgFriendPacket,
+	"OidbSvc.0xd79":                                decodeWordSegmentation,
+	"OidbSvc.0x990":                                decodeTranslateResponse,
+	"SummaryCard.ReqSummaryCard":                   decodeSummaryCardResponse,
+	"LightAppSvc.mini_app_info.GetAppInfoById":     decodeAppInfoResponse,
 }
 
 func init() {
@@ -159,7 +175,12 @@ func NewClient(uin int64, password string) *QQClient {
 	return NewClientMd5(uin, md5.Sum([]byte(password)))
 }
 
+func NewClientEmpty() *QQClient {
+	return NewClient(0, "")
+}
+
 func NewClientMd5(uin int64, passwordMd5 [16]byte) *QQClient {
+	crypto.ECDH.FetchPubKey(uin)
 	cli := &QQClient{
 		Uin:                     uin,
 		PasswordMd5:             passwordMd5,
@@ -167,8 +188,9 @@ func NewClientMd5(uin int64, passwordMd5 [16]byte) *QQClient {
 		AllowSlider:             true,
 		RandomKey:               make([]byte, 16),
 		OutGoingPacketSessionId: []byte{0x02, 0xB0, 0x5B, 0x8B},
+		TCP:                     &utils.TCPListener{},
 		sigInfo:                 &loginSigInfo{},
-		requestPacketRequestId:  1921334513,
+		requestPacketRequestID:  1921334513,
 		groupSeq:                int32(rand.Intn(20000)),
 		friendSeq:               22911,
 		highwayApplyUpSeq:       77918,
@@ -227,7 +249,10 @@ func NewClientMd5(uin int64, passwordMd5 [16]byte) *QQClient {
 	if len(cli.servers) > 3 {
 		cli.servers = cli.servers[0 : len(cli.servers)/2] // 保留ping值中位数以上的server
 	}
+	cli.TCP.PlannedDisconnect(cli.plannedDisconnect)
+	cli.TCP.UnexpectedDisconnect(cli.unexpectedDisconnect)
 	rand.Read(cli.RandomKey)
+	go cli.netLoop()
 	return cli
 }
 
@@ -240,7 +265,6 @@ func (c *QQClient) Login() (*LoginResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	go c.netLoop()
 	rsp, err := c.sendAndWait(c.buildLoginPacket())
 	if err != nil {
 		c.Disconnect()
@@ -248,9 +272,72 @@ func (c *QQClient) Login() (*LoginResponse, error) {
 	}
 	l := rsp.(LoginResponse)
 	if l.Success {
-		c.init()
+		_ = c.init(false)
 	}
 	return &l, nil
+}
+
+func (c *QQClient) TokenLogin(token []byte) error {
+	if c.Online {
+		return ErrAlreadyOnline
+	}
+	err := c.connect()
+	if err != nil {
+		return err
+	}
+	{
+		r := binary.NewReader(token)
+		c.Uin = r.ReadInt64()
+		c.sigInfo.d2 = r.ReadBytesShort()
+		c.sigInfo.d2Key = r.ReadBytesShort()
+		c.sigInfo.tgt = r.ReadBytesShort()
+		c.sigInfo.srmToken = r.ReadBytesShort()
+		c.sigInfo.t133 = r.ReadBytesShort()
+		c.sigInfo.encryptedA1 = r.ReadBytesShort()
+		c.sigInfo.wtSessionTicketKey = r.ReadBytesShort()
+		c.OutGoingPacketSessionId = r.ReadBytesShort()
+		SystemDeviceInfo.TgtgtKey = r.ReadBytesShort()
+	}
+	_, err = c.sendAndWait(c.buildRequestChangeSigPacket())
+	if err != nil {
+		return err
+	}
+	return c.init(true)
+}
+
+func (c *QQClient) FetchQRCode() (*QRCodeLoginResponse, error) {
+	if c.Online {
+		return nil, ErrAlreadyOnline
+	}
+	err := c.connect()
+	if err != nil {
+		return nil, err
+	}
+	i, err := c.sendAndWait(c.buildQRCodeFetchRequestPacket())
+	if err != nil {
+		return nil, errors.Wrap(err, "fetch qrcode error")
+	}
+	return i.(*QRCodeLoginResponse), nil
+}
+
+func (c *QQClient) QueryQRCodeStatus(sig []byte) (*QRCodeLoginResponse, error) {
+	i, err := c.sendAndWait(c.buildQRCodeResultQueryRequestPacket(sig))
+	if err != nil {
+		return nil, errors.Wrap(err, "query result error")
+	}
+	return i.(*QRCodeLoginResponse), nil
+}
+
+func (c *QQClient) QRCodeLogin(info *QRCodeLoginInfo) (*LoginResponse, error) {
+	i, err := c.sendAndWait(c.buildQRCodeLoginPacket(info.tmpPwd, info.tmpNoPicSig, info.tgtQR))
+	if err != nil {
+		return nil, errors.Wrap(err, "qrcode login error")
+	}
+	rsp := i.(LoginResponse)
+	if rsp.Success {
+		_ = c.init(false)
+	}
+	return &rsp, nil
 }
 
 // SubmitCaptcha send captcha to server
@@ -263,7 +350,7 @@ func (c *QQClient) SubmitCaptcha(result string, sign []byte) (*LoginResponse, er
 	}
 	l := rsp.(LoginResponse)
 	if l.Success {
-		c.init()
+		_ = c.init(false)
 	}
 	return &l, nil
 }
@@ -277,7 +364,7 @@ func (c *QQClient) SubmitTicket(ticket string) (*LoginResponse, error) {
 	}
 	l := rsp.(LoginResponse)
 	if l.Success {
-		c.init()
+		_ = c.init(false)
 	}
 	return &l, nil
 }
@@ -290,7 +377,7 @@ func (c *QQClient) SubmitSMS(code string) (*LoginResponse, error) {
 	}
 	l := rsp.(LoginResponse)
 	if l.Success {
-		c.init()
+		_ = c.init(false)
 	}
 	return &l, nil
 }
@@ -304,14 +391,42 @@ func (c *QQClient) RequestSMS() bool {
 	return rsp.(LoginResponse).Error == SMSNeededError
 }
 
-func (c *QQClient) init() {
-	c.Online = true
-	_ = c.registerClient()
+func (c *QQClient) init(tokenLogin bool) error {
+	if len(c.g) == 0 {
+		c.Warning("device lock is disable. http api may fail.")
+	}
+	if err := c.registerClient(); err != nil {
+		return errors.Wrap(err, "register error")
+	}
+	if tokenLogin {
+		notify := make(chan struct{})
+		d := c.waitPacket("StatSvc.ReqMSFOffline", func(i interface{}, err error) {
+			notify <- struct{}{}
+		})
+		d2 := c.waitPacket("MessageSvc.PushForceOffline", func(i interface{}, err error) {
+			notify <- struct{}{}
+		})
+		select {
+		case <-notify:
+			d()
+			d2()
+			return errors.New("token failed")
+		case <-time.After(time.Second):
+			d()
+			d2()
+		}
+	}
 	c.groupSysMsgCache, _ = c.GetGroupSystemMessages()
 	if !c.heartbeatEnabled {
 		go c.doHeartbeat()
 	}
 	_ = c.RefreshStatus()
+	if c.version.Protocol == QiDian {
+		_, _ = c.sendAndWait(c.buildLoginExtraPacket())     // 小登录
+		_, _ = c.sendAndWait(c.buildConnKeyRequestPacket()) // big data key 如果等待 config push 的话时间来不及
+	}
+	seq, pkt := c.buildGetMessageRequestPacket(msg.SyncFlag_START, time.Now().Unix())
+	_, _ = c.sendAndWait(seq, pkt, requestParams{"used_reg_proxy": true, "init": true})
 	c.stat.once.Do(func() {
 		c.OnGroupMessage(func(_ *QQClient, _ *message.GroupMessage) {
 			c.stat.MessageReceived++
@@ -321,7 +436,7 @@ func (c *QQClient) init() {
 			c.stat.MessageReceived++
 			c.stat.LastMessageTime = time.Now().Unix()
 		})
-		c.OnTempMessage(func(_ *QQClient, _ *message.TempMessage) {
+		c.OnTempMessage(func(_ *QQClient, _ *TempMessageEvent) {
 			c.stat.MessageReceived++
 			c.stat.LastMessageTime = time.Now().Unix()
 		})
@@ -329,6 +444,30 @@ func (c *QQClient) init() {
 			c.stat.MessageSent++
 		})
 	})
+	return nil
+}
+
+func (c *QQClient) GenToken() []byte {
+	return binary.NewWriterF(func(w *binary.Writer) {
+		w.WriteUInt64(uint64(c.Uin))
+		w.WriteBytesShort(c.sigInfo.d2)
+		w.WriteBytesShort(c.sigInfo.d2Key)
+		w.WriteBytesShort(c.sigInfo.tgt)
+		w.WriteBytesShort(c.sigInfo.srmToken)
+		w.WriteBytesShort(c.sigInfo.t133)
+		w.WriteBytesShort(c.sigInfo.encryptedA1)
+		w.WriteBytesShort(c.sigInfo.wtSessionTicketKey)
+		w.WriteBytesShort(c.OutGoingPacketSessionId)
+		w.WriteBytesShort(SystemDeviceInfo.TgtgtKey)
+	})
+}
+
+func (c *QQClient) SetOnlineStatus(s UserOnlineStatus) {
+	if s < 1000 {
+		_, _ = c.sendAndWait(c.buildStatusSetPacket(int32(s), 0))
+		return
+	}
+	_, _ = c.sendAndWait(c.buildStatusSetPacket(11, int32(s)))
 }
 
 func (c *QQClient) GetVipInfo(target int64) (*VipInfo, error) {
@@ -412,9 +551,18 @@ func (c *QQClient) ReloadFriendList() error {
 	return nil
 }
 
-// GetFriendList request friend list
+// GetFriendList
+// 当使用普通QQ时: 请求好友列表
+// 当使用企点QQ时: 请求外部联系人列表
 func (c *QQClient) GetFriendList() (*FriendListResponse, error) {
-	var curFriendCount = 0
+	if c.version.Protocol == QiDian {
+		rsp, err := c.getQiDianAddressDetailList()
+		if err != nil {
+			return nil, err
+		}
+		return &FriendListResponse{TotalCount: int32(len(rsp)), List: rsp}, nil
+	}
+	curFriendCount := 0
 	r := &FriendListResponse{}
 	for {
 		rsp, err := c.sendAndWait(c.buildFriendGroupListRequestPacket(int16(curFriendCount), 150, 0, 0))
@@ -432,8 +580,8 @@ func (c *QQClient) GetFriendList() (*FriendListResponse, error) {
 	return r, nil
 }
 
-func (c *QQClient) GetForwardMessage(resId string) *message.ForwardMessage {
-	m := c.DownloadForwardMessage(resId)
+func (c *QQClient) GetForwardMessage(resID string) *message.ForwardMessage {
+	m := c.DownloadForwardMessage(resID)
 	if m == nil {
 		return nil
 	}
@@ -497,7 +645,7 @@ func (c *QQClient) DownloadForwardMessage(resId string) *message.ForwardElement 
 	)
 }
 
-func (c *QQClient) sendGroupPoke(groupCode, target int64) {
+func (c *QQClient) SendGroupPoke(groupCode, target int64) {
 	_, _ = c.sendAndWait(c.buildGroupPokePacket(groupCode, target))
 }
 
@@ -566,9 +714,20 @@ func (c *QQClient) GetGroupMembers(group *GroupInfo) ([]*GroupMemberInfo, error)
 		}
 		list = append(list, rsp.list...)
 		if nextUin == 0 {
+			sort.Slice(list, func(i, j int) bool {
+				return list[i].Uin < list[j].Uin
+			})
 			return list, nil
 		}
 	}
+}
+
+func (c *QQClient) GetMemberInfo(groupCode, memberUin int64) (*GroupMemberInfo, error) {
+	info, err := c.sendAndWait(c.buildGroupMemberInfoRequestPacket(groupCode, memberUin))
+	if err != nil {
+		return nil, err
+	}
+	return info.(*GroupMemberInfo), nil
 }
 
 func (c *QQClient) FindFriend(uin int64) *FriendInfo {
@@ -579,6 +738,14 @@ func (c *QQClient) FindFriend(uin int64) *FriendInfo {
 		}
 	}
 	return nil
+}
+
+func (c *QQClient) DeleteFriend(uin int64) error {
+	if c.FindFriend(uin) == nil {
+		return errors.New("friend not found")
+	}
+	_, err := c.sendAndWait(c.buildFriendDeletePacket(uin))
+	return errors.Wrap(err, "delete friend error")
 }
 
 func (c *QQClient) FindGroupByUin(uin int64) *GroupInfo {
@@ -609,10 +776,16 @@ func (c *QQClient) SolveGroupJoinRequest(i interface{}, accept, block bool, reas
 
 	switch req := i.(type) {
 	case *UserJoinGroupRequest:
-		_, pkt := c.buildSystemMsgGroupActionPacket(req.RequestId, req.RequesterUin, req.GroupCode, false, accept, block, reason)
+		_, pkt := c.buildSystemMsgGroupActionPacket(req.RequestId, req.RequesterUin, req.GroupCode, func() int32 {
+			if req.Suspicious {
+				return 2
+			} else {
+				return 1
+			}
+		}(), false, accept, block, reason)
 		_ = c.send(pkt)
 	case *GroupInvitedRequest:
-		_, pkt := c.buildSystemMsgGroupActionPacket(req.RequestId, req.InvitorUin, req.GroupCode, true, accept, block, reason)
+		_, pkt := c.buildSystemMsgGroupActionPacket(req.RequestId, req.InvitorUin, req.GroupCode, 1, true, accept, block, reason)
 		_ = c.send(pkt)
 	}
 }
@@ -623,7 +796,7 @@ func (c *QQClient) SolveFriendRequest(req *NewFriendRequest, accept bool) {
 }
 
 func (c *QQClient) getSKey() string {
-	if c.sigInfo.sKeyExpiredTime < time.Now().Unix() {
+	if c.sigInfo.sKeyExpiredTime < time.Now().Unix() && len(c.g) > 0 {
 		c.Debug("skey expired. refresh...")
 		_, _ = c.sendAndWait(c.buildRequestTgtgtNopicsigPacket())
 	}
@@ -650,14 +823,6 @@ func (c *QQClient) getCSRFToken() int {
 		accu = accu + (accu << 5) + int(b)
 	}
 	return 2147483647 & accu
-}
-
-func (c *QQClient) getMemberInfo(groupCode, memberUin int64) (*GroupMemberInfo, error) {
-	info, err := c.sendAndWait(c.buildGroupMemberInfoRequestPacket(groupCode, memberUin))
-	if err != nil {
-		return nil, err
-	}
-	return info.(*GroupMemberInfo), nil
 }
 
 func (c *QQClient) editMemberCard(groupCode, memberUin int64, card string) {
@@ -698,45 +863,14 @@ func (c *QQClient) kickGroupMember(groupCode, memberUin int64, msg string, block
 
 func (g *GroupInfo) removeMember(uin int64) {
 	g.Update(func(info *GroupInfo) {
-		for i, m := range info.Members {
-			if m.Uin == uin {
-				info.Members = append(info.Members[:i], info.Members[i+1:]...)
-				break
-			}
+		i := sort.Search(len(info.Members), func(i int) bool {
+			return info.Members[i].Uin >= uin
+		})
+		if i >= len(info.Members) || info.Members[i].Uin != uin { // not found
+			return
 		}
+		info.Members = append(info.Members[:i], info.Members[i+1:]...)
 	})
-}
-
-func (c *QQClient) connect() error {
-	c.Info("connect to server: %v", c.servers[c.currServerIndex].String())
-	conn, err := net.DialTCP("tcp", nil, c.servers[c.currServerIndex])
-	c.currServerIndex++
-	if c.currServerIndex == len(c.servers) {
-		c.currServerIndex = 0
-	}
-	if err != nil || conn == nil {
-		c.retryTimes++
-		if c.retryTimes > len(c.servers) {
-			return errors.New("All servers are unreachable")
-		}
-		c.Error("connect server error: %v", err)
-		if err = c.connect(); err != nil {
-			return err
-		}
-		return nil
-	}
-	c.retryTimes = 0
-	c.ConnectTime = time.Now()
-	c.Conn = conn
-	return nil
-}
-
-func (c *QQClient) Disconnect() {
-	c.NetLooping = false
-	c.Online = false
-	if c.Conn != nil {
-		_ = c.Conn.Close()
-	}
 }
 
 func (c *QQClient) SetCustomServer(servers []*net.TCPAddr) {
@@ -750,6 +884,9 @@ func (c *QQClient) SendGroupGift(groupCode, uin uint64, gift message.GroupGift) 
 
 func (c *QQClient) registerClient() error {
 	_, err := c.sendAndWait(c.buildClientRegisterPacket())
+	if err == nil {
+		c.Online = true
+	}
 	return err
 }
 
@@ -758,7 +895,7 @@ func (c *QQClient) nextSeq() uint16 {
 }
 
 func (c *QQClient) nextPacketSeq() int32 {
-	return atomic.AddInt32(&c.requestPacketRequestId, 2)
+	return atomic.AddInt32(&c.requestPacketRequestID, 2)
 }
 
 func (c *QQClient) nextGroupSeq() int32 {
@@ -778,7 +915,7 @@ func (c *QQClient) nextHighwayApplySeq() int32 {
 }
 
 func (c *QQClient) send(pkt []byte) error {
-	_, err := c.Conn.Write(pkt)
+	err := c.TCP.Write(pkt)
 	if err != nil {
 		c.stat.PacketLost++
 	} else {
@@ -787,7 +924,7 @@ func (c *QQClient) send(pkt []byte) error {
 	return errors.Wrap(err, "Packet failed to send")
 }
 
-func (c *QQClient) sendAndWait(seq uint16, pkt []byte) (interface{}, error) {
+func (c *QQClient) sendAndWait(seq uint16, pkt []byte, params ...requestParams) (interface{}, error) {
 	type T struct {
 		Response interface{}
 		Error    error
@@ -800,15 +937,23 @@ func (c *QQClient) sendAndWait(seq uint16, pkt []byte) (interface{}, error) {
 
 	ch := make(chan T)
 	defer close(ch)
-	c.handlers.Store(seq, func(i interface{}, err error) {
+
+	p := func() requestParams {
+		if len(params) == 0 {
+			return nil
+		}
+		return params[0]
+	}()
+
+	c.handlers.Store(seq, &handlerInfo{fun: func(i interface{}, err error) {
 		ch <- T{
 			Response: i,
 			Error:    err,
 		}
-	})
+	}, params: p})
 
 	retry := 0
-	for true {
+	for {
 		select {
 		case rsp := <-ch:
 			return rsp.Response, rsp.Error
@@ -819,12 +964,11 @@ func (c *QQClient) sendAndWait(seq uint16, pkt []byte) (interface{}, error) {
 				continue
 			}
 			c.handlers.Delete(seq)
-			//c.Error("packet timed out, seq: %v", seq)
-			//println("Packet Timed out")
+			// c.Error("packet timed out, seq: %v", seq)
+			// println("Packet Timed out")
 			return nil, errors.New("Packet timed out")
 		}
 	}
-	return nil, nil
 }
 
 // 等待一个或多个数据包解析, 优先级低于 sendAndWait
@@ -836,54 +980,93 @@ func (c *QQClient) waitPacket(cmd string, f func(interface{}, error)) func() {
 	}
 }
 
-func (c *QQClient) netLoop() {
-	if c.NetLooping {
+func (c *QQClient) connect() error {
+	c.Info("connect to server: %v", c.servers[c.currServerIndex].String())
+	err := c.TCP.Connect(c.servers[c.currServerIndex])
+	c.currServerIndex++
+	if c.currServerIndex == len(c.servers) {
+		c.currServerIndex = 0
+	}
+	if err != nil {
+		c.retryTimes++
+		if c.retryTimes > len(c.servers) {
+			return errors.New("All servers are unreachable")
+		}
+		c.Error("connect server error: %v", err)
+		return err
+	}
+	c.retryTimes = 0
+	c.ConnectTime = time.Now()
+	return nil
+}
+
+func (c *QQClient) quickReconnect() {
+	c.Disconnect()
+	time.Sleep(time.Millisecond * 200)
+	if err := c.connect(); err != nil {
+		c.Error("connect server error: %v", err)
+		c.dispatchDisconnectEvent(&ClientDisconnectedEvent{Message: "quick reconnect failed"})
 		return
 	}
-	c.NetLooping = true
-	reader := binary.NewNetworkReader(c.Conn)
-	retry := 0
+	if err := c.registerClient(); err != nil {
+		c.Error("register client failed: %v", err)
+		c.Disconnect()
+		c.dispatchDisconnectEvent(&ClientDisconnectedEvent{Message: "register error"})
+		return
+	}
+}
+
+func (c *QQClient) Disconnect() {
+	c.Online = false
+	c.TCP.Close()
+}
+
+func (c *QQClient) plannedDisconnect(_ *utils.TCPListener) {
+	c.Debug("planned disconnect.")
+	c.stat.DisconnectTimes++
+	c.Online = false
+}
+
+func (c *QQClient) unexpectedDisconnect(_ *utils.TCPListener, e error) {
+	c.Error("unexpected disconnect: %v", e)
+	c.stat.DisconnectTimes++
+	c.Online = false
+	if err := c.connect(); err != nil {
+		c.Error("connect server error: %v", err)
+		c.dispatchDisconnectEvent(&ClientDisconnectedEvent{Message: "connection dropped by server."})
+		return
+	}
+	if err := c.registerClient(); err != nil {
+		c.Error("register client failed: %v", err)
+		c.Disconnect()
+		c.dispatchDisconnectEvent(&ClientDisconnectedEvent{Message: "register error"})
+		return
+	}
+}
+
+func (c *QQClient) netLoop() {
+	// todo: release this
 	errCount := 0
-	for c.NetLooping {
-		l, err := reader.ReadInt32()
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
-			c.Error("connection dropped by server: %v", err)
-			c.stat.DisconnectTimes++
-			err = c.connect()
-			if err != nil {
-				c.Error("connect server error: %v", err)
-				break
-			}
-			reader = binary.NewNetworkReader(c.Conn)
-			go func() {
-				if e := c.registerClient(); e != nil && e.Error() != "Packet timed out" { // 掉线在心跳已经有判断了, 只需要处理返回值
-					c.lastLostMsg = "register client failed: " + e.Error()
-					c.Disconnect()
-					c.Error("reconnect failed: " + e.Error())
-					//break
-				}
-			}()
-		}
-		if l <= 0 {
-			retry++
-			time.Sleep(time.Second * 3)
-			if retry > 10 {
-				break
-			}
+	for {
+		l, err := c.TCP.ReadInt32()
+		if err != nil {
+			time.Sleep(time.Millisecond * 500)
 			continue
 		}
-		data, err := reader.ReadBytes(int(l) - 4)
+		data, _ := c.TCP.ReadBytes(int(l) - 4)
 		pkt, err := packets.ParseIncomingPacket(data, c.sigInfo.d2Key)
 		if err != nil {
 			c.Error("parse incoming packet error: %v", err)
 			if errors.Is(err, packets.ErrSessionExpired) || errors.Is(err, packets.ErrPacketDropped) {
-				break
+				c.Disconnect()
+				go c.dispatchDisconnectEvent(&ClientDisconnectedEvent{Message: "session expired"})
+				continue
 			}
 			errCount++
 			if errCount > 2 {
-				break
+				go c.quickReconnect()
+				continue
 			}
-			//log.Println("parse incoming packet error: " + err.Error())
 			continue
 		}
 		payload := pkt.Payload
@@ -895,7 +1078,6 @@ func (c *QQClient) netLoop() {
 			}
 		}
 		errCount = 0
-		retry = 0
 		c.Debug("rev pkt: %v seq: %v", pkt.CommandName, pkt.SequenceId)
 		c.stat.PacketReceived++
 		go func() {
@@ -907,52 +1089,62 @@ func (c *QQClient) netLoop() {
 
 			if decoder, ok := decoders[pkt.CommandName]; ok {
 				// found predefined decoder
-				rsp, err := decoder(c, pkt.SequenceId, payload)
+				info, ok := c.handlers.LoadAndDelete(pkt.SequenceId)
+				rsp, err := decoder(c, &incomingPacketInfo{
+					SequenceId:  pkt.SequenceId,
+					CommandName: pkt.CommandName,
+					Params: func() requestParams {
+						if !ok {
+							return nil
+						}
+						return info.params
+					}(),
+				}, payload)
 				if err != nil {
 					c.Debug("decode pkt %v error: %+v", pkt.CommandName, err)
 				}
-				if f, ok := c.handlers.LoadAndDelete(pkt.SequenceId); ok {
-					f(rsp, err)
+				if ok {
+					info.fun(rsp, err)
 				} else if f, ok := c.waiters.Load(pkt.CommandName); ok { // 在不存在handler的情况下触发wait
 					f.(func(interface{}, error))(rsp, err)
 				}
 			} else if f, ok := c.handlers.LoadAndDelete(pkt.SequenceId); ok {
 				// does not need decoder
-				f(nil, nil)
+				f.fun(nil, nil)
 			} else {
 				c.Debug("Unhandled Command: %s\nSeq: %d\nThis message can be ignored.", pkt.CommandName, pkt.SequenceId)
 			}
 		}()
 	}
-	c.NetLooping = false
-	c.Online = false
-	_ = c.Conn.Close()
-	if c.lastLostMsg == "" {
-		c.lastLostMsg = "Connection lost."
-	}
-	c.stat.LostTimes++
-	c.dispatchDisconnectEvent(&ClientDisconnectedEvent{Message: c.lastLostMsg})
+	/*
+		c.NetLooping = false
+		c.Online = false
+		_ = c.TCP.Close()
+		if c.lastLostMsg == "" {
+			c.lastLostMsg = "Connection lost."
+		}
+		c.stat.LostTimes++
+		c.dispatchDisconnectEvent(&ClientDisconnectedEvent{Message: c.lastLostMsg})
+	*/
 }
 
 func (c *QQClient) doHeartbeat() {
 	c.heartbeatEnabled = true
 	times := 0
 	for c.Online {
+		time.Sleep(time.Second * 30)
 		seq := c.nextSeq()
-		sso := packets.BuildSsoPacket(seq, c.version.AppId, "Heartbeat.Alive", SystemDeviceInfo.IMEI, []byte{}, c.OutGoingPacketSessionId, []byte{}, c.ksid)
+		sso := packets.BuildSsoPacket(seq, c.version.AppId, c.version.SubAppId, "Heartbeat.Alive", SystemDeviceInfo.IMEI, []byte{}, c.OutGoingPacketSessionId, []byte{}, c.ksid)
 		packet := packets.BuildLoginPacket(c.Uin, 0, []byte{}, sso, []byte{})
 		_, err := c.sendAndWait(seq, packet)
-		if err != nil {
-			c.lastLostMsg = "Heartbeat failed: " + err.Error()
-			c.Disconnect()
-			break
+		if errors.Is(err, utils.ErrConnectionClosed) {
+			continue
 		}
 		times++
 		if times >= 7 {
 			_ = c.registerClient()
 			times = 0
 		}
-		time.Sleep(time.Second * 30)
 	}
 	c.heartbeatEnabled = false
 }

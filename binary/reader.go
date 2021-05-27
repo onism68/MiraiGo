@@ -62,6 +62,11 @@ func (r *Reader) ReadInt32() int32 {
 	return (int32(b[0]) << 24) | (int32(b[1]) << 16) | (int32(b[2]) << 8) | int32(b[3])
 }
 
+func (r *Reader) ReadInt64() int64 {
+	b := r.ReadBytes(8)
+	return ((int64(b[0]) << 56) | (int64(b[1]) << 48) | (int64(b[2]) << 40) | (int64(b[3]) << 32) | int64(b[4])<<24) | (int64(b[5]) << 16) | (int64(b[6]) << 8) | int64(b[7])
+}
+
 func (r *Reader) ReadString() string {
 	data := r.ReadBytes(int(r.ReadInt32() - 4))
 	return string(data)
@@ -112,10 +117,8 @@ func (r *Reader) Len() int {
 }
 
 func (tlv TlvMap) Exists(key uint16) bool {
-	if _, ok := tlv[key]; ok {
-		return true
-	}
-	return false
+	_, ok := tlv[key]
+	return ok
 }
 
 // --- Network reader ---
@@ -139,13 +142,13 @@ func (r *NetworkReader) ReadByte() (byte, error) {
 func (r *NetworkReader) ReadBytes(len int) ([]byte, error) {
 	buf := make([]byte, len)
 	_, err := io.ReadFull(r.conn, buf)
-	//for i := 0; i < len; i++ {
-	//	b, err := r.ReadByte()
-	//	if err != nil {
+	// for i := 0; i < len; i++ {
+	//	 b, err := r.ReadByte()
+	//	 if err != nil {
 	//		return nil, err
-	//	}
-	//	buf[i] = b
-	//}
+	//	 }
+	// 	 buf[i] = b
+	// }
 	return buf, err
 }
 

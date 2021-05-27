@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Mrs4s/MiraiGo/utils"
+
 	"github.com/Mrs4s/MiraiGo/binary"
 )
 
@@ -19,8 +21,8 @@ func (c *QQClient) decodeT161(data []byte) {
 	}
 }
 
-func (c *QQClient) decodeT119(data []byte) {
-	tea := binary.NewTeaCipher(SystemDeviceInfo.TgtgtKey)
+func (c *QQClient) decodeT119(data, ek []byte) {
+	tea := binary.NewTeaCipher(ek)
 	reader := binary.NewReader(tea.Decrypt(data))
 	reader.ReadBytes(2)
 	m := reader.ReadTlvMap(2)
@@ -41,24 +43,24 @@ func (c *QQClient) decodeT119(data []byte) {
 	}
 
 	var (
-		//openId   []byte
-		//openKey  []byte
-		//payToken []byte
-		//pf       []byte
-		//pfkey    []byte
+		// openId   []byte
+		// openKey  []byte
+		// payToken []byte
+		// pf       []byte
+		// pfkey    []byte
 		gender uint16 = 0
 		age    uint16 = 0
 		nick          = ""
-		//a1       []byte
-		//noPicSig []byte
-		//ctime           = time.Now().Unix()
-		//etime           = ctime + 2160000
+		// a1       []byte
+		// noPicSig []byte
+		// ctime           = time.Now().Unix()
+		// etime           = ctime + 2160000
 		psKeyMap    map[string][]byte
 		pt4TokenMap map[string][]byte
 	)
 
 	if _, ok := m[0x125]; ok {
-		//openId, openKey = readT125(t125)
+		// openId, openKey = readT125(t125)
 	}
 	if t186, ok := m[0x186]; ok {
 		c.decodeT186(t186)
@@ -67,27 +69,27 @@ func (c *QQClient) decodeT119(data []byte) {
 		nick, age, gender = readT11A(t11a)
 	}
 	if _, ok := m[0x199]; ok {
-		//openId, payToken = readT199(t199)
+		// openId, payToken = readT199(t199)
 	}
 	if _, ok := m[0x200]; ok {
-		//pf, pfkey = readT200(t200)
+		// pf, pfkey = readT200(t200)
 	}
 	if t512, ok := m[0x512]; ok {
 		psKeyMap, pt4TokenMap = readT512(t512)
 	}
 	if _, ok := m[0x531]; ok {
-		//a1, noPicSig = readT531(t531)
+		// a1, noPicSig = readT531(t531)
 	}
 
 	if _, ok := m[0x138]; ok {
-		//readT138(t138) // chg time
+		// readT138(t138) // chg time
 	}
 
 	c.sigInfo = &loginSigInfo{
 		loginBitmap:        0,
-		srmToken:           m[0x16a],
-		t133:               m[0x133],
-		encryptedA1:        m[0x106],
+		srmToken:           utils.Select(m[0x16a], c.sigInfo.srmToken),
+		t133:               utils.Select(m[0x133], c.sigInfo.t133),
+		encryptedA1:        utils.Select(m[0x106], c.sigInfo.encryptedA1),
 		tgt:                m[0x10a],
 		tgtKey:             m[0x10d],
 		userStKey:          m[0x10e],
@@ -96,17 +98,21 @@ func (c *QQClient) decodeT119(data []byte) {
 		sKeyExpiredTime:    time.Now().Unix() + 21600,
 		d2:                 m[0x143],
 		d2Key:              m[0x305],
-		wtSessionTicketKey: m[0x134],
+		wtSessionTicketKey: utils.Select(m[0x134], c.sigInfo.wtSessionTicketKey),
 		deviceToken:        m[0x322],
 
 		psKeyMap:    psKeyMap,
 		pt4TokenMap: pt4TokenMap,
 	}
-	key := md5.Sum(append(append(c.PasswordMd5[:], []byte{0x00, 0x00, 0x00, 0x00}...), binary.NewWriterF(func(w *binary.Writer) { w.WriteUInt32(uint32(c.Uin)) })...))
-	decrypted := binary.NewTeaCipher(key[:]).Decrypt(c.sigInfo.encryptedA1)
-	dr := binary.NewReader(decrypted)
-	dr.ReadBytes(51)
-	SystemDeviceInfo.TgtgtKey = dr.ReadBytes(16)
+	if len(c.PasswordMd5[:]) > 0 {
+		key := md5.Sum(append(append(c.PasswordMd5[:], []byte{0x00, 0x00, 0x00, 0x00}...), binary.NewWriterF(func(w *binary.Writer) { w.WriteUInt32(uint32(c.Uin)) })...))
+		decrypted := binary.NewTeaCipher(key[:]).Decrypt(c.sigInfo.encryptedA1)
+		if len(decrypted) > 51+16 {
+			dr := binary.NewReader(decrypted)
+			dr.ReadBytes(51)
+			SystemDeviceInfo.TgtgtKey = dr.ReadBytes(16)
+		}
+	}
 	c.Nickname = nick
 	c.Age = age
 	c.Gender = gender
@@ -148,9 +154,9 @@ func (c *QQClient) decodeT186(data []byte) {
 
 // --- tlv readers ---
 
-func readT125(data []byte) (openId, openKey []byte) {
+func readT125(data []byte) (openID, openKey []byte) {
 	reader := binary.NewReader(data)
-	openId = reader.ReadBytesShort()
+	openID = reader.ReadBytesShort()
 	openKey = reader.ReadBytesShort()
 	return
 }
@@ -164,9 +170,9 @@ func readT11A(data []byte) (nick string, age, gender uint16) {
 	return
 }
 
-func readT199(data []byte) (openId, payToken []byte) {
+func readT199(data []byte) (openID, payToken []byte) {
 	reader := binary.NewReader(data)
-	openId = reader.ReadBytesShort()
+	openID = reader.ReadBytesShort()
 	payToken = reader.ReadBytesShort()
 	return
 }

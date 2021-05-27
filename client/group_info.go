@@ -2,6 +2,12 @@ package client
 
 import (
 	"fmt"
+	"math/rand"
+	"net/url"
+	"sort"
+	"strings"
+	"sync"
+
 	"github.com/Mrs4s/MiraiGo/binary"
 	"github.com/Mrs4s/MiraiGo/binary/jce"
 	"github.com/Mrs4s/MiraiGo/client/pb/oidb"
@@ -10,22 +16,20 @@ import (
 	"github.com/Mrs4s/MiraiGo/utils"
 	"github.com/pkg/errors"
 	"google.golang.org/protobuf/proto"
-	"math/rand"
-	"net/url"
-	"strings"
-	"sync"
 )
 
 type (
 	GroupInfo struct {
-		Uin            int64
-		Code           int64
-		Name           string
-		Memo           string
-		OwnerUin       int64
-		MemberCount    uint16
-		MaxMemberCount uint16
-		Members        []*GroupMemberInfo
+		Uin             int64
+		Code            int64
+		Name            string
+		Memo            string
+		OwnerUin        int64
+		GroupCreateTime uint32
+		GroupLevel      uint32
+		MemberCount     uint16
+		MaxMemberCount  uint16
+		Members         []*GroupMemberInfo
 		// 最后一条信息的SEQ,只有通过 GetGroupInfo 函数获取的 GroupInfo 才会有
 		LastMsgSeq int64
 
@@ -52,6 +56,7 @@ type (
 	GroupSearchInfo struct {
 		Code int64  // 群号
 		Name string // 群名
+		Memo string // 简介
 	}
 )
 
@@ -182,7 +187,7 @@ func (c *QQClient) buildGroupSearchPacket(keyword string) (uint16, []byte) {
 }
 
 // SummaryCard.ReqSearch
-func decodeGroupSearchResponse(_ *QQClient, _ uint16, payload []byte) (interface{}, error) {
+func decodeGroupSearchResponse(_ *QQClient, _ *incomingPacketInfo, payload []byte) (interface{}, error) {
 	request := &jce.RequestPacket{}
 	request.ReadFrom(jce.NewJceReader(payload))
 	data := &jce.RequestDataVersion2{}
@@ -210,6 +215,7 @@ func decodeGroupSearchResponse(_ *QQClient, _ uint16, payload []byte) (interface
 			ret = append(ret, GroupSearchInfo{
 				Code: int64(g.GetCode()),
 				Name: g.GetName(),
+				Memo: g.GetBrief(),
 			})
 		}
 		return ret, nil
@@ -218,7 +224,7 @@ func decodeGroupSearchResponse(_ *QQClient, _ uint16, payload []byte) (interface
 }
 
 // OidbSvc.0x88d_0
-func decodeGroupInfoResponse(c *QQClient, _ uint16, payload []byte) (interface{}, error) {
+func decodeGroupInfoResponse(c *QQClient, _ *incomingPacketInfo, payload []byte) (interface{}, error) {
 	pkg := oidb.OIDBSSOPkg{}
 	rsp := oidb.D88DRspBody{}
 	if err := proto.Unmarshal(payload, &pkg); err != nil {
@@ -235,16 +241,18 @@ func decodeGroupInfoResponse(c *QQClient, _ uint16, payload []byte) (interface{}
 		return nil, errors.New("group info not found")
 	}
 	return &GroupInfo{
-		Uin:            int64(*info.GroupInfo.GroupUin),
-		Code:           int64(*info.GroupCode),
-		Name:           string(info.GroupInfo.GroupName),
-		Memo:           string(info.GroupInfo.GroupMemo),
-		OwnerUin:       int64(*info.GroupInfo.GroupOwner),
-		MemberCount:    uint16(*info.GroupInfo.GroupMemberNum),
-		MaxMemberCount: uint16(*info.GroupInfo.GroupMemberMaxNum),
-		Members:        []*GroupMemberInfo{},
-		LastMsgSeq:     int64(info.GroupInfo.GetGroupCurMsgSeq()),
-		client:         c,
+		Uin:             int64(*info.GroupInfo.GroupUin),
+		Code:            int64(*info.GroupCode),
+		Name:            string(info.GroupInfo.GroupName),
+		Memo:            string(info.GroupInfo.GroupMemo),
+		GroupCreateTime: *info.GroupInfo.GroupCreateTime,
+		GroupLevel:      *info.GroupInfo.GroupLevel,
+		OwnerUin:        int64(*info.GroupInfo.GroupOwner),
+		MemberCount:     uint16(*info.GroupInfo.GroupMemberNum),
+		MaxMemberCount:  uint16(*info.GroupInfo.GroupMemberMaxNum),
+		Members:         []*GroupMemberInfo{},
+		LastMsgSeq:      int64(info.GroupInfo.GetGroupCurMsgSeq()),
+		client:          c,
 	}, nil
 }
 
@@ -322,13 +330,20 @@ func (g *GroupInfo) FindMember(uin int64) *GroupMemberInfo {
 }
 
 func (g *GroupInfo) FindMemberWithoutLock(uin int64) *GroupMemberInfo {
-	for _, m := range g.Members {
-		f := m
-		if f.Uin == uin {
-			return f
-		}
+	i := sort.Search(len(g.Members), func(i int) bool {
+		return g.Members[i].Uin >= uin
+	})
+	if i >= len(g.Members) || g.Members[i].Uin != uin {
+		return nil
 	}
-	return nil
+	return g.Members[i]
+}
+
+// sort call this method must hold the lock
+func (g *GroupInfo) sort() {
+	sort.Slice(g.Members, func(i, j int) bool {
+		return g.Members[i].Uin < g.Members[j].Uin
+	})
 }
 
 func (g *GroupInfo) Update(f func(*GroupInfo)) {
@@ -358,7 +373,7 @@ func (m *GroupMemberInfo) EditCard(card string) {
 }
 
 func (m *GroupMemberInfo) Poke() {
-	m.Group.client.sendGroupPoke(m.Group.Code, m.Uin)
+	m.Group.client.SendGroupPoke(m.Group.Code, m.Uin)
 }
 
 func (m *GroupMemberInfo) SetAdmin(flag bool) {
